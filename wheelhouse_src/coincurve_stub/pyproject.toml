@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Stub for coincurve. bip-utils 2.9.0 pulls coincurve (>=15.0.1,<19.0.0)
+# as its DEFAULT secp256k1 backend — but coincurve is a C wrapper around
+# libsecp256k1, and the versions in that pinned range have no pre-built
+# wheel for Python 3.13+. On those interpreters pip falls back to building
+# coincurve from source, which needs autotools + a C toolchain that most
+# users (e.g. on Kali, minimal distros) don't have.
+#
+# BlueCLI sidesteps this entirely: the launcher patches bip-utils to use
+# its built-in PURE-PYTHON ecdsa backend instead (EccConf.USE_COINCURVE =
+# False), which produces byte-identical keys and addresses. With that flag
+# off, bip-utils never imports coincurve — so this stub is never actually
+# loaded. It exists only so pip considers the coincurve dependency
+# satisfied and skips the doomed source build.
+#
+# Version 18.0.0 sits inside bip-utils' accepted range.
+name = "coincurve"
+version = "18.0.0"
+description = "Import-time stub for coincurve (BlueCLI uses bip-utils' ecdsa backend)"
+requires-python = ">=3.8"
+
+[tool.setuptools]
+py-modules = ["coincurve"]

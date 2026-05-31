@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# Stub for ed25519-blake2b. bip-utils pulls this in for Nano-style
+# wallets (a cryptocurrency BlueCLI never touches). Sentinel signs with
+# secp256k1, so this code path is dead in our application — we just
+# need pip to consider the dep satisfied so it stops trying to compile
+# the upstream C extension on Windows.
+name = "ed25519-blake2b"
+version = "1.4.1"
+description = "Import-time stub for ed25519-blake2b (Nano path unused by BlueCLI)"
+requires-python = ">=3.8"
+
+[tool.setuptools]
+py-modules = ["ed25519_blake2b"]

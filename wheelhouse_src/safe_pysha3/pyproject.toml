@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+# This package masquerades as safe-pysha3 to satisfy the mospy-wallet
+# dependency without building any C extension. The actual Keccak work
+# is done by pycryptodome (a transitive dep that already ships wheels
+# for every platform we care about).
+name = "safe-pysha3"
+version = "1.0.5"
+description = "Pure-Python shim for safe-pysha3 (delegates Keccak to pycryptodome)"
+requires-python = ">=3.8"
+dependencies = ["pycryptodome>=3.18.0"]
+
+[tool.setuptools]
+py-modules = ["sha3"]

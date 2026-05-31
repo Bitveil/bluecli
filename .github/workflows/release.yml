@@ -1,0 +1,43 @@
+name: Release
+
+# Triggered when you push a tag like `v1.0.0`. Builds both archives
+# (Linux + Windows) on a Linux runner and uploads them to the GitHub
+# Release that the tag created. No Windows runner needed because the
+# "build" is just file copies + zip — no PyInstaller, no compilation.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write   # softprops/action-gh-release writes the release
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify version tag matches __init__.py
+        run: |
+          declared=$(grep -oE '__version__\s*=\s*"[^"]+"' src/bluecli/__init__.py \
+                     | grep -oE '"[^"]+"' | tr -d '"')
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$declared" != "$tag" ]; then
+            echo "ERROR: tag $GITHUB_REF_NAME implies version $tag,"
+            echo "       but src/bluecli/__init__.py says $declared."
+            exit 1
+          fi
+
+      - name: Build both archives
+        run: bash packaging/build_linux.sh
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            bluecli-*-linux-x64.tar.gz
+            bluecli-*-linux-x64.tar.gz.sha256
+            bluecli-*-windows-x64.zip
+            bluecli-*-windows-x64.zip.sha256
+          fail_on_unmatched_files: true

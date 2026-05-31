@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bluecli"
+version = "1.0.0"
+description = "BlueCLI — a minimal command-line client for the Sentinel dVPN network."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "BlueCLI" }]
+
+# Kept intentionally small. sentinel-sdk pulls grpcio, mospy, bip-utils,
+# pycryptodome, ecdsa transitively; we depend on what we directly import.
+#
+# Why the tarball URL and not git+https? Some users (especially on Windows)
+# don't have git on PATH, and pip needs git to clone a `git+https://...`
+# requirement. GitHub serves the same revision over plain HTTPS as a
+# tarball — pip handles that with stdlib, no git binary required.
+dependencies = [
+    "sentinel-sdk @ https://github.com/MathNodes/sentinel-python-sdk/archive/refs/heads/v12.tar.gz",
+    "mnemonic>=0.20",
+    "bech32>=1.2.0",
+    "pynacl>=1.5.0",
+    "cryptography>=42.0.0",
+    "requests>=2.31.0",
+    "ecdsa>=0.19.0",
+]
+
+[project.scripts]
+bluecli = "bluecli.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bluecli = ["locales/*.json"]
