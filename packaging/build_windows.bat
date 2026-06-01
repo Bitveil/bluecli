@@ -27,7 +27,6 @@ mkdir "%PKG%"
 
 REM --- Source tree + launcher ---------------------------------------------
 xcopy /e /q /y src             "%PKG%\src\"             >nul
-xcopy /e /q /y tests           "%PKG%\tests\"           >nul
 xcopy /e /q /y wheels          "%PKG%\wheels\"          >nul
 xcopy /e /q /y wheelhouse_src  "%PKG%\wheelhouse_src\"  >nul
 copy /y pyproject.toml "%PKG%\" >nul

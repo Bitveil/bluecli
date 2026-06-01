@@ -5,3 +5,10 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Release build artifacts (produced by packaging/build_linux.sh) — these are
+# uploaded as Release assets, never committed to the repo.
+/bluecli-*-x64/
+/bluecli-*.tar.gz
+/bluecli-*.zip
+/*.sha256

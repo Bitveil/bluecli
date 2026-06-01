@@ -2222,28 +2222,45 @@ def test_atomic_write_json_roundtrip_and_mode():
 
 
 def test_verify_public_ip_no_route_is_bounded():
-    """When the tunnel isn't reaching the internet, verify must NOT call any
-    fetch (which could hang on DNS), must stay within budget, and must return
-    'no_route' (the caller then restores the network)."""
+    """When nothing reaches the internet — neither the DNS-free probe nor the
+    hostname fetch — verify returns 'no_route' within budget. The hostname
+    fetch is bounded in a thread, so even a hanging resolver can't overrun us."""
     import time as _time
     from bluecli import menus
-    orig = (menus._has_connectivity, menus._fetch_public_ip, menus._fetch_public_ip_no_dns)
-
-    def _boom(timeout):
-        raise AssertionError("must not fetch while unreachable")
-
-    menus._has_connectivity = lambda timeout=3.0: False
-    menus._fetch_public_ip = _boom
-    menus._fetch_public_ip_no_dns = _boom
+    orig = (menus._fetch_public_ip, menus._fetch_public_ip_no_dns)
+    menus._fetch_public_ip_no_dns = lambda timeout: None   # DNS-free probe fails
+    menus._fetch_public_ip = lambda timeout: None          # hostname fetch yields nothing
     try:
         start = _time.time()
         status = menus._verify_public_ip(pre_connect_ip="1.2.3.4", budget=0.5)
         elapsed = _time.time() - start
     finally:
-        (menus._has_connectivity, menus._fetch_public_ip,
-         menus._fetch_public_ip_no_dns) = orig
-    assert elapsed < 5.0, f"verify overran its budget: {elapsed:.1f}s"
+        (menus._fetch_public_ip, menus._fetch_public_ip_no_dns) = orig
     assert status == "no_route"
+    assert elapsed < 5.0, f"verify overran its budget: {elapsed:.1f}s"
+
+
+def test_verify_public_ip_dns_fallback_when_cloudflare_blocked():
+    """The office/hotspot case that was a false negative: the DNS-free probe
+    (Cloudflare 1.1.1.1) is blocked, but the node routes everything else. A
+    hostname lookup returns a changed exit IP → routing and DNS both work →
+    'ok', NOT a bogus 'no_route' that tears a working tunnel down."""
+    from bluecli import menus
+    from bluecli import ui as _ui
+    orig = (menus._fetch_public_ip_no_dns, menus._fetch_public_ip,
+            menus._dns_resolves, _ui.info)
+    infos: list = []
+    menus._fetch_public_ip_no_dns = lambda timeout: None      # Cloudflare blocked
+    menus._dns_resolves = lambda **kw: True                   # resolver works
+    menus._fetch_public_ip = lambda timeout: "5.6.7.8"        # node IP via hostname
+    _ui.info = lambda msg, *a, **k: infos.append(msg)
+    try:
+        status = menus._verify_public_ip(pre_connect_ip="1.2.3.4", budget=5.0)
+    finally:
+        (menus._fetch_public_ip_no_dns, menus._fetch_public_ip,
+         menus._dns_resolves, _ui.info) = orig
+    assert status == "ok"
+    assert any("5.6.7.8" in str(m) for m in infos)
 
 
 def test_verify_public_ip_reports_changed_ip():
@@ -2251,18 +2268,15 @@ def test_verify_public_ip_reports_changed_ip():
     and the exit IP is shown."""
     from bluecli import menus
     from bluecli import ui as _ui
-    orig = (menus._has_connectivity, menus._fetch_public_ip_no_dns,
-            menus._dns_resolves, _ui.info)
+    orig = (menus._fetch_public_ip_no_dns, menus._dns_resolves, _ui.info)
     infos: list = []
-    menus._has_connectivity = lambda timeout=3.0: True
     menus._fetch_public_ip_no_dns = lambda timeout: "9.9.9.9"
     menus._dns_resolves = lambda **kw: True
     _ui.info = lambda msg, *a, **k: infos.append(msg)
     try:
         status = menus._verify_public_ip(pre_connect_ip="1.2.3.4", budget=5.0)
     finally:
-        (menus._has_connectivity, menus._fetch_public_ip_no_dns,
-         menus._dns_resolves, _ui.info) = orig
+        (menus._fetch_public_ip_no_dns, menus._dns_resolves, _ui.info) = orig
     assert status == "ok"
     assert any("9.9.9.9" in str(m) for m in infos)
 
@@ -2273,20 +2287,67 @@ def test_verify_public_ip_detects_broken_dns():
     the user can see the tunnel reached the internet — no silent hang."""
     from bluecli import menus
     from bluecli import ui as _ui
-    orig = (menus._has_connectivity, menus._fetch_public_ip_no_dns,
-            menus._dns_resolves, _ui.info)
+    orig = (menus._fetch_public_ip_no_dns, menus._dns_resolves, _ui.info)
     infos: list = []
-    menus._has_connectivity = lambda timeout=3.0: True
     menus._fetch_public_ip_no_dns = lambda timeout: "9.9.9.9"
     menus._dns_resolves = lambda **kw: False
     _ui.info = lambda msg, *a, **k: infos.append(msg)
     try:
         status = menus._verify_public_ip(pre_connect_ip="1.2.3.4", budget=2.0)
     finally:
-        (menus._has_connectivity, menus._fetch_public_ip_no_dns,
-         menus._dns_resolves, _ui.info) = orig
+        (menus._fetch_public_ip_no_dns, menus._dns_resolves, _ui.info) = orig
     assert status == "dns"
     assert any("9.9.9.9" in str(m) for m in infos)
+
+
+def test_verify_fallback_not_gated_by_dns_precheck():
+    """Regression: the hostname fallback used to fire ONLY if a Cloudflare name
+    resolved within 4s. On a hostile network / during tunnel warm-up that
+    pre-check failed, so a perfectly working tunnel (a browser hitting
+    api.ipify.org returns the node IP) was torn down as a bogus 'no_route'.
+    The fallback must now stand on its own: DNS-free probe blocked AND the
+    Cloudflare-name resolver check failing, yet a hostname fetch returns a
+    CHANGED exit IP -> the tunnel routes and resolves -> 'ok'."""
+    from bluecli import menus
+    from bluecli import ui as _ui
+    orig = (menus._fetch_public_ip_no_dns, menus._fetch_public_ip,
+            menus._dns_resolves, _ui.info)
+    infos: list = []
+    menus._fetch_public_ip_no_dns = lambda timeout: None   # Cloudflare blocked
+    menus._dns_resolves = lambda **kw: False               # old gate would block here
+    menus._fetch_public_ip = lambda timeout: "5.6.7.8"     # node IP, fetched by name
+    _ui.info = lambda msg, *a, **k: infos.append(msg)
+    try:
+        status = menus._verify_public_ip(pre_connect_ip="1.2.3.4", budget=5.0)
+    finally:
+        (menus._fetch_public_ip_no_dns, menus._fetch_public_ip,
+         menus._dns_resolves, _ui.info) = orig
+    assert status == "ok", f"expected ok, got {status!r}"
+    assert any("5.6.7.8" in str(m) for m in infos)
+
+
+def test_fetch_public_ip_bounded_caps_a_hang():
+    """The hostname fetch is now called unconditionally in the verify loop, so
+    it MUST be hang-proof: a resolver that never answers can't be allowed to
+    overrun. _fetch_public_ip_bounded returns within ~timeout even when the
+    underlying fetch hangs."""
+    import time as _time
+    from bluecli import menus
+    orig = menus._fetch_public_ip
+
+    def _hang(timeout):
+        _time.sleep(5.0)
+        return "9.9.9.9"
+
+    menus._fetch_public_ip = _hang
+    try:
+        start = _time.time()
+        ip = menus._fetch_public_ip_bounded(timeout=0.3)
+        elapsed = _time.time() - start
+    finally:
+        menus._fetch_public_ip = orig
+    assert ip is None, f"should not have waited for the hang, got {ip!r}"
+    assert elapsed < 2.0, f"bounded fetch overran: {elapsed:.1f}s"
 
 
 def test_teardown_tunnel_dispatches_by_backend():
@@ -2669,26 +2730,27 @@ def test_emergency_cleanup_tears_down_multihop():
     assert calls["strip"] == 1
 
 
-def test_restore_after_failed_verify_restores_and_keeps_creds():
-    """A failed verification must tear the tunnel down and strip ONLY runtime
-    state (keeping session/creds so the user can retry), with a reason message
-    that differs between the DNS and no-route cases."""
+def test_warn_after_unverified_keeps_tunnel():
+    """A verification that can't confirm connectivity must NOT tear the tunnel
+    down or strip runtime state — the tunnel stays up and the user decides. It
+    only warns, with a message that differs between the DNS and no-route cases."""
     from bluecli import menus
     from bluecli import config as cfg
     from bluecli import ui as _ui
 
-    calls = {"teardown": 0, "strip": 0, "errors": []}
-    saved = (menus._teardown_tunnel, cfg.strip_runtime_state, _ui.error)
+    calls = {"teardown": 0, "strip": 0, "warns": []}
+    saved = (menus._teardown_tunnel, cfg.strip_runtime_state, _ui.warn)
     menus._teardown_tunnel = lambda st: calls.__setitem__("teardown", calls["teardown"] + 1)
     cfg.strip_runtime_state = lambda: calls.__setitem__("strip", calls["strip"] + 1)
-    _ui.error = lambda msg, *a, **k: calls["errors"].append(str(msg))
+    _ui.warn = lambda msg, *a, **k: calls["warns"].append(str(msg))
     try:
-        menus._restore_after_failed_verify({"backend": "v2ray"}, "dns")
-        menus._restore_after_failed_verify({"backend": "v2ray"}, "no_route")
+        menus._warn_after_unverified("dns")
+        menus._warn_after_unverified("no_route")
     finally:
-        (menus._teardown_tunnel, cfg.strip_runtime_state, _ui.error) = saved
-    assert calls["teardown"] == 2 and calls["strip"] == 2
-    assert len(calls["errors"]) == 2 and calls["errors"][0] != calls["errors"][1]
+        (menus._teardown_tunnel, cfg.strip_runtime_state, _ui.warn) = saved
+    assert calls["teardown"] == 0, "a verify warning must not tear the tunnel down"
+    assert calls["strip"] == 0, "a verify warning must not strip runtime state"
+    assert len(calls["warns"]) == 2 and calls["warns"][0] != calls["warns"][1]
 
 
 def test_outbound_dials_by_ip_direct():
@@ -2866,8 +2928,11 @@ def main() -> int:
         ("menus.session_usage_str_and_threshold", test_session_usage_str_and_threshold),
         ("config.atomic_write_roundtrip", test_atomic_write_json_roundtrip_and_mode),
         ("menus.verify_no_route_bounded", test_verify_public_ip_no_route_is_bounded),
+        ("menus.verify_dns_fallback", test_verify_public_ip_dns_fallback_when_cloudflare_blocked),
         ("menus.verify_reports_changed_ip", test_verify_public_ip_reports_changed_ip),
         ("menus.verify_detects_broken_dns", test_verify_public_ip_detects_broken_dns),
+        ("menus.verify_fallback_ungated", test_verify_fallback_not_gated_by_dns_precheck),
+        ("menus.fetch_public_ip_bounded_caps_hang", test_fetch_public_ip_bounded_caps_a_hang),
         ("menus.teardown_dispatches_by_backend", test_teardown_tunnel_dispatches_by_backend),
         ("menus.ending_active_session_tears_down", test_ending_active_session_tears_down_tunnel),
         ("transport_cache.record_and_eligible", test_transport_cache_record_and_eligible),
@@ -2888,7 +2953,7 @@ def main() -> int:
         ("menus.parse_trace_ip", test_parse_trace_ip),
         ("routing.connected_resolv_conf_tcp", test_connected_resolv_conf_forces_tcp_dns),
         ("main.emergency_cleanup_multihop", test_emergency_cleanup_tears_down_multihop),
-        ("menus.restore_after_failed_verify", test_restore_after_failed_verify_restores_and_keeps_creds),
+        ("menus.warn_after_unverified", test_warn_after_unverified_keeps_tunnel),
         ("v2ray.outbound_dials_by_ip_direct", test_outbound_dials_by_ip_direct),
         ("v2ray.outbound_through_proxy_keeps_host", test_outbound_through_proxy_keeps_hostname),
         ("v2ray.outbound_fallback_host", test_outbound_falls_back_to_host_without_dial_ip),

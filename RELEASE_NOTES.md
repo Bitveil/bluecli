@@ -1,8 +1,10 @@
-# BlueCLI v1.0.0
+# BlueCLI v1.0.1
 
-First public release of BlueCLI — a minimal, self-contained command-line client for the [Sentinel](https://sentinel.co) decentralised VPN network.
+A minimal, self-contained command-line client for the [Sentinel](https://sentinel.co) decentralised VPN network: create or import a wallet, browse dVPN nodes, and route your traffic through **WireGuard** or **V2Ray** as a full tunnel — with multi-hop and on-chain session management.
 
-Create or import a Sentinel wallet, browse active dVPN nodes, and route your traffic through **WireGuard** or **V2Ray** as a seamless full tunnel — with multi-hop, on-chain session management, and zero system install.
+## Fixed in this release
+
+- **Connection no longer fails with a false “no traffic reached the internet.”** The post-connect check used to depend entirely on reaching Cloudflare (`1.1.1.1`), which many networks and exit nodes block even while routing everything else — so a perfectly good node was torn down. The check now confirms the exit IP through a hostname-based fallback too, and accepts the tunnel if either path sees traffic.
 
 ## Highlights
 
@@ -17,14 +19,14 @@ Create or import a Sentinel wallet, browse active dVPN nodes, and route your tra
 
 | Platform | File |
 |---|---|
-| Linux x86-64 | `bluecli-1.0.0-linux-x64.tar.gz` |
-| Windows x64 | `bluecli-1.0.0-windows-x64.zip` |
+| Linux x86-64 | `bluecli-1.0.1-linux-x64.tar.gz` |
+| Windows x64 | `bluecli-1.0.1-windows-x64.zip` |
 
 ## Install
 
 **Linux**
 ```bash
-tar xzf bluecli-1.0.0-linux-x64.tar.gz
+tar xzf bluecli-1.0.1-linux-x64.tar.gz
 cd bluecli-linux-x64
 ./bluecli.sh
 ```
@@ -38,7 +40,7 @@ The first launch builds a local Python virtual environment inside the folder (~3
 Each archive ships with a matching `.sha256` sidecar; verify before running:
 
 ```bash
-sha256sum -c bluecli-1.0.0-linux-x64.tar.gz.sha256
+sha256sum -c bluecli-1.0.1-linux-x64.tar.gz.sha256
 ```
 
 ## Notes
@@ -47,4 +49,4 @@ sha256sum -c bluecli-1.0.0-linux-x64.tar.gz.sha256
 - **Back up your 24-word mnemonic.** It is the only way to recover your wallet.
 - Supported platforms: Linux x86-64 and Windows x64.
 
-Full feature list in the [CHANGELOG](CHANGELOG.md).
+Full history in the [CHANGELOG](CHANGELOG.md).

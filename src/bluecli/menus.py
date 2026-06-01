@@ -7,7 +7,9 @@ loops — just nested function calls following the user's choices.
 
 from __future__ import annotations
 
+import os
 import socket
+import sys
 import threading
 import time
 import urllib.error
@@ -503,14 +505,15 @@ def _bring_up_tunnel(
     state.update(runtime)
     state.pop("orphan_session_id", None)
     cfg.save_state(state)
-    # Don't claim success until we've confirmed the tunnel actually carries
-    # traffic AND resolves names. If it doesn't, fail safe: restore the user's
-    # network rather than leave them in a dead/half tunnel.
+    # Verify the tunnel carries traffic and resolves names. A failure here does
+    # NOT tear the tunnel down: the check endpoints are often blocked on the
+    # user's own network even when the node routes fine, so we keep the tunnel
+    # up and just warn — the user tests it and decides, or disconnects.
     status = _verify_public_ip(pre_connect_ip=pre_connect_ip)
     if status == "ok":
         ui.success(t("connect.success", node.moniker or node.address[-10:]))
     else:
-        _restore_after_failed_verify(state, status)
+        _warn_after_unverified(status)
     _pause()
 
 
@@ -552,6 +555,32 @@ def _fetch_public_ip(timeout: float) -> Optional[str]:
     return None
 
 
+def _dbg(msg: str) -> None:
+    """Verbose verify diagnostics to stderr when BLUECLI_DEBUG is set — used to
+    chase a connection failure on a hostile network. A no-op otherwise."""
+    if os.environ.get("BLUECLI_DEBUG"):
+        print(f"[bluecli debug] {msg}", file=sys.stderr, flush=True)
+
+
+def _fetch_public_ip_bounded(timeout: float) -> Optional[str]:
+    """`_fetch_public_ip` (hostname-based) hard-bounded in a daemon thread.
+    getaddrinfo ignores socket timeouts and can hang on a broken resolver, so
+    we never call the hostname fetch inline in the verify loop — we cap it here
+    and treat an overrun as 'no IP'."""
+    result: dict = {"ip": None}
+
+    def _run() -> None:
+        try:
+            result["ip"] = _fetch_public_ip(timeout=timeout)
+        except Exception:
+            pass
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join(timeout + 1.0)
+    return result["ip"]
+
+
 def _parse_trace_ip(body: str) -> Optional[str]:
     """Pull the `ip=...` line out of a Cloudflare cdn-cgi/trace body."""
     for line in body.splitlines():
@@ -576,21 +605,6 @@ def _fetch_public_ip_no_dns(timeout: float) -> Optional[str]:
         except (urllib.error.URLError, TimeoutError, OSError):
             continue
     return None
-
-
-def _has_connectivity(timeout: float = 3.0) -> bool:
-    """Bounded TCP reach test to a public IP *literal* — no DNS lookup, so
-    it can't hang on a broken resolver the way a hostname fetch can. A
-    plain socket connect honours its timeout (unlike getaddrinfo), which
-    is what keeps _verify_public_ip from overrunning its budget when the
-    tunnel isn't routing (e.g. a dead node)."""
-    for host in ("1.1.1.1", "8.8.8.8"):
-        try:
-            with socket.create_connection((host, 443), timeout=timeout):
-                return True
-        except OSError:
-            continue
-    return False
 
 
 def _dns_resolves(host: str = "one.one.one.one", timeout: float = 4.0) -> bool:
@@ -629,21 +643,21 @@ def _verify_status(reachable: bool, exit_ip: Optional[str],
 def _verify_public_ip(pre_connect_ip: Optional[str] = None, *, budget: float = 30.0) -> str:
     """Confirm the tunnel actually works, returning 'ok' | 'dns' | 'no_route'.
 
-    Strategy: a DNS-FREE probe first establishes that the tunnel routes (and
-    reveals the exit IP, which we show the user regardless of DNS). Only then
-    do we test the system resolver. This way a DNS problem is reported as a
-    DNS problem — never as the silent hang that a hostname-only probe produced
-    when name resolution was the thing that was broken.
+    A DNS-FREE probe runs first so a DNS problem is reported as a DNS problem
+    rather than as a silent hang. That probe targets Cloudflare by IP, though,
+    and plenty of networks/nodes can't reach 1.1.1.1 even while routing
+    everything else (1.1.1.1 is widely blocked or hijacked). So if it comes up
+    empty we fall back to a hostname lookup: a changed exit IP there proves
+    routing AND DNS both work. Only when neither path sees the tunnel carry
+    traffic — across the whole budget — do we call it 'no_route'.
     """
     deadline = time.time() + budget
     while time.time() < deadline:
-        if not _has_connectivity(timeout=3.0):
-            time.sleep(1.0)
-            continue
+        # 1) DNS-free probe (Cloudflare IP literal): tells routing apart from DNS.
         exit_ip = _fetch_public_ip_no_dns(timeout=4.0)
+        _dbg(f"verify: dns-free probe -> {exit_ip!r} (pre={pre_connect_ip!r})")
         if exit_ip and (pre_connect_ip is None or exit_ip != pre_connect_ip):
-            # Tunnel routes. Show the exit IP now — the user has earned it —
-            # then give DNS a few seconds to come good before judging it.
+            # Tunnel routes. Show the exit IP now, then give DNS a few seconds.
             ui.info(t("connect.public_ip", exit_ip))
             dns_deadline = min(deadline, time.time() + 8.0)
             dns_ok = False
@@ -653,20 +667,35 @@ def _verify_public_ip(pre_connect_ip: Optional[str] = None, *, budget: float = 3
                     break
                 time.sleep(1.0)
             return _verify_status(True, exit_ip, pre_connect_ip, dns_ok)
+
+        # 2) Cloudflare unreachable — but the node may route everything else.
+        # Fetch the public IP BY HOSTNAME (bounded in a thread, so a broken
+        # resolver can't hang us): a changed IP proves routing AND DNS both
+        # work. We must NOT gate this on first resolving a Cloudflare name —
+        # that tied the fallback back to the very thing we're working around,
+        # and a slow/blocked cold resolver during tunnel warm-up was skipping
+        # this path entirely, turning a working tunnel into a bogus "no route".
+        exit_ip = _fetch_public_ip_bounded(timeout=4.0)
+        _dbg(f"verify: hostname probe -> {exit_ip!r}")
+        if exit_ip and (pre_connect_ip is None or exit_ip != pre_connect_ip):
+            ui.info(t("connect.public_ip", exit_ip))
+            return "ok"
+
         time.sleep(2.0)
+    _dbg("verify: budget exhausted -> no_route")
     return "no_route"
 
 
-def _restore_after_failed_verify(state: dict, status: str) -> None:
-    """The tunnel came up but isn't usable ('no_route' or 'dns'). Tear it down
-    and put the user's normal network back — never leave them stranded in a
-    half-connected, non-browsing state. The paid session(s)/credentials are
-    KEPT (only runtime state is stripped), so the user can retry from
-    'My active sessions' / 'Multihop' without paying or re-handshaking."""
-    _teardown_tunnel(state)
-    cfg.strip_runtime_state()
-    ui.error(t("connect.verify_dns_failed" if status == "dns"
-               else "connect.verify_route_failed"))
+def _warn_after_unverified(status: str) -> None:
+    """The tunnel came up but our connectivity check couldn't confirm it works.
+    We deliberately do NOT tear it down: the check endpoints are often blocked
+    on the very network the user is on (corporate firewalls love to drop
+    1.1.1.1 and friends), which says nothing about whether the node itself
+    routes. So we keep the tunnel up and warn — the user can test it and decide,
+    or disconnect from the menu if it really isn't working. The message differs
+    between the DNS and no-route cases."""
+    ui.warn(t("connect.verify_dns_unconfirmed" if status == "dns"
+              else "connect.verify_unconfirmed"))
 
 
 def _get_or_fetch_creds(
@@ -948,14 +977,13 @@ def _bring_up_chain_from_state(state: dict, pre_connect_ip) -> bool:
     status = _verify_public_ip(pre_connect_ip=pre_connect_ip)
     if status == "ok":
         ui.success(t("multihop.connected", connected_label(state)))
-        _pause()
-        return True
-    # Chain came up but isn't usable — restore the network (creds kept for a
-    # resume). Reported as a failed bring-up so the caller surfaces the
-    # still-active sessions.
-    _restore_after_failed_verify(state, status)
+    else:
+        # The chain is up but the check couldn't confirm it (often the user's
+        # network blocking the check endpoints). Keep it up and warn — it's
+        # connected as far as we can tell, so we report success to the caller.
+        _warn_after_unverified(status)
     _pause()
-    return False
+    return True
 
 
 def _multihop_partial_notice(state: dict) -> None:

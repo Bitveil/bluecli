@@ -5,6 +5,18 @@ All notable changes to BlueCLI are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-06-01
+
+### Fixed
+
+- Connection verification no longer reports a false "no traffic reached the
+  internet through this node" when the tunnel is actually working. The route
+  check previously depended entirely on reaching Cloudflare (`1.1.1.1`), which
+  many networks and exit nodes block or hijack even while routing everything
+  else — so a healthy node was torn down. The check now falls back to a
+  hostname-based public-IP lookup: if the exit IP is confirmed by either path,
+  the tunnel is correctly accepted.
+
 ## [1.0.0] - 2026-05-31
 
 First public release.
@@ -32,4 +44,5 @@ First public release.
   requirement is Python 3.10+. No system install, services, or residue.
 - **Startup splash and persistent banner** for a bit of polish.
 
+[1.0.1]: https://github.com/YOUR-ORG/bluecli/releases/tag/v1.0.1
 [1.0.0]: https://github.com/YOUR-ORG/bluecli/releases/tag/v1.0.0

@@ -111,6 +111,6 @@
   "connect.using_cached_creds": "Using cached credentials from a previous handshake (no chain hit needed).",
   "connect.session_already_registered": "Session {0} is already registered on the node from a previous attempt, but we no longer have the credentials. The node refuses a second handshake by design. End this session from the sessions menu (<num>e) to free the chain record, then create a fresh one.",
   "connect.public_ip": "Public IP (via tunnel): {0}",
-  "connect.verify_route_failed": "No traffic reached the internet through this node (it may be down or blocked on this network). I've torn the tunnel down and restored your normal connection — try a different node.",
-  "connect.verify_dns_failed": "The tunnel reached the internet but name resolution isn't working through this node, so pages won't load by name. I've restored your normal connection — try a different node, or this one again later."
+  "connect.verify_unconfirmed": "The tunnel is up, but I couldn't confirm internet access through this node — the connectivity-check endpoints may be blocked on this network, which doesn't necessarily mean the node is down. Try browsing; if it really isn't working, disconnect from the menu and pick another node.",
+  "connect.verify_dns_unconfirmed": "The tunnel is up and routing traffic, but name resolution couldn't be confirmed through this node, so some sites may not load by name. Try browsing; if it isn't working, disconnect from the menu and pick another node."
 }

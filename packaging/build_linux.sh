@@ -30,7 +30,7 @@ PKG_LINUX=bluecli-linux-x64
 rm -rf "$PKG_LINUX"
 mkdir "$PKG_LINUX"
 
-cp -r src tests wheels wheelhouse_src "$PKG_LINUX/"
+cp -r src wheels wheelhouse_src "$PKG_LINUX/"
 cp pyproject.toml bluecli.sh cleanup.sh LICENSE "$PKG_LINUX/"
 
 mkdir -p "$PKG_LINUX/bin/wireguard" "$PKG_LINUX/bin/v2ray"
@@ -89,7 +89,7 @@ if [ "$WIN_BINS_PRESENT" = "true" ]; then
     rm -rf "$PKG_WIN"
     mkdir "$PKG_WIN"
 
-    cp -r src tests wheels wheelhouse_src "$PKG_WIN/"
+    cp -r src wheels wheelhouse_src "$PKG_WIN/"
     cp pyproject.toml bluecli.bat cleanup.bat LICENSE "$PKG_WIN/"
 
     mkdir -p "$PKG_WIN/bin/wireguard" "$PKG_WIN/bin/v2ray"
