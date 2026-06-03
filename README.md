@@ -58,7 +58,7 @@ Supported platforms: **Linux x86-64** and **Windows x64**.
 
 ## Install
 
-1. Download the archive for your platform from the [latest release](https://github.com/YOUR-ORG/bluecli/releases/latest):
+1. Download the archive for your platform from the [latest release](https://github.com/Bitveil/bluecli/releases/latest):
    - Linux — `bluecli-<version>-linux-x64.tar.gz`
    - Windows — `bluecli-<version>-windows-x64.zip`
 2. Extract it anywhere you like (your home folder, a USB stick, wherever).
@@ -161,7 +161,7 @@ Then delete the folder. That's the entire uninstall. **`cleanup` erases your wal
 BlueCLI runs straight from a clone — the launcher does the venv setup for you, exactly as it does from a release archive.
 
 ```bash
-git clone https://github.com/YOUR-ORG/bluecli
+git clone https://github.com/Bitveil/bluecli
 cd bluecli
 ./bluecli.sh
 ```
