@@ -3,7 +3,7 @@
 A minimal, self-contained command-line client for the [Sentinel](https://sentinel.co) decentralised VPN network.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)
+![Python](https://img.shields.io/badge/python-3.10--3.14-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-blue.svg)
 ![Release](https://img.shields.io/badge/release-v1.0.0-blue.svg)
 
@@ -46,7 +46,7 @@ Create or import a Cosmos/Sentinel wallet, browse active dVPN nodes, and route y
 
 ## Requirements
 
-- **Python 3.10 or newer**, available on your `PATH`.
+- **Python 3.10–3.14**, available on your `PATH`. (A just-released Python may not yet have prebuilt packages for every dependency — prefer the latest version in this range.)
   - Most Linux distributions ship it; if not, install it with your package manager (e.g. `sudo apt install python3`).
   - On Windows, install from [python.org](https://www.python.org/downloads/) and tick **“Add Python to PATH”** during setup.
 - **Administrator / root.** Managing a VPN tunnel needs elevated privileges. The launcher elevates for you (UAC prompt on Windows, `sudo` on Linux).
@@ -198,7 +198,7 @@ This produces **both** archives (Linux `.tar.gz` and Windows `.zip`) plus their 
 
 ## Troubleshooting
 
-- **“python3 is not installed or not on PATH.”** Install Python 3.10+ and make sure it's on `PATH` (on Windows, re-run the installer and tick *Add Python to PATH*).
+- **“python3 is not installed or not on PATH.”** Install Python 3.10–3.14 and make sure it's on `PATH` (on Windows, re-run the installer and tick *Add Python to PATH*).
 - **First run is slow.** That's the one-time venv build (~30s). Later launches are instant.
 - **The connection comes up but there's no internet.** Press `d` to disconnect and reconnect, or pick another node. A node can drop or a session can expire; BlueCLI restores your normal network on disconnect.
 - **Windows SmartScreen / antivirus prompts.** The bundled WireGuard, V2Ray, and tun2socks binaries are unsigned upstream releases; allow them if your policy permits.

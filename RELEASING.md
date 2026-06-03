@@ -9,7 +9,7 @@ first-run**. No PyInstaller, no compilation, no platform-specific build
 steps — just `cp` + `tar` / `zip`. The launcher handles Python venv
 creation on the user's machine.
 
-End user requirements: **Python 3.10+ on PATH**. Nothing else.
+End user requirements: **Python 3.10–3.14 on PATH**. Nothing else.
 
 ---
 
@@ -225,7 +225,7 @@ Otherwise:
    SHA256 sidecar files are attached for verification.
 
    ## Requires
-   - Python 3.10 or newer on PATH (see README for setup)
+   - Python 3.10–3.14 on PATH (see README for setup)
    ```
 5. Drag-and-drop both archives + their `.sha256` files into the
    upload area

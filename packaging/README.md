@@ -2,7 +2,7 @@
 
 Source-mode release builds. Each archive contains the BlueCLI source tree
 + the right platform's bundled binaries + a launcher script that sets up
-a Python venv on first run. End user needs only Python 3.10+ on PATH.
+a Python venv on first run. End user needs only Python 3.10-3.14 on PATH.
 
 ## Build scripts
 
@@ -38,7 +38,7 @@ machine running Ubuntu 22 (glibc 2.35). Workarounds (build on manylinux,
 musl, static-link Python) add layers of complexity that don't pay off
 for a community tool.
 
-Asking for Python 3.10+ is a one-time pip-installable thing that most
+Asking for Python 3.10-3.14 is a one-time pip-installable thing that most
 users already have. The launcher script handles everything else (venv,
 shim wheels, the actual app install) on first run, takes 30-60s, and
 never has to run again. We picked the latter trade-off and ship source

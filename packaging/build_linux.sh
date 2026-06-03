@@ -9,7 +9,7 @@
 #                                           built)
 #
 # Both archives are source-mode: the launcher script inside creates a Python
-# venv on first run. End user needs Python 3.10+ on PATH and nothing else.
+# venv on first run. End user needs Python 3.10-3.14 on PATH and nothing else.
 
 set -euo pipefail
 
@@ -44,7 +44,7 @@ BlueCLI v$VERSION  --  Sentinel dVPN client (Linux x86-64)
 
 Requirements
 ------------
-  - Python 3.10 or newer (most Linux distros have it preinstalled;
+  - Python 3.10-3.14 (most Linux distros have it preinstalled;
     if not: 'sudo apt install python3' or your distro's equivalent)
   - sudo
   - That's it. WireGuard tools, v2ray, and tun2socks are bundled.
@@ -103,7 +103,7 @@ BlueCLI v$VERSION  --  Sentinel dVPN client (Windows x86-64)
 
 Requirements
 ------------
-  - Python 3.10 or newer (install from https://www.python.org/,
+  - Python 3.10-3.14 (install from https://www.python.org/,
     tick "Add Python to PATH" during setup)
   - Administrator rights (the launcher requests them automatically)
   - That's it. WireGuard, v2ray, tun2socks and wintun are bundled.

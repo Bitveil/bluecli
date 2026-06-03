@@ -25,11 +25,11 @@ fi
 
 export BLUECLI_HOME="$HERE"
 
-# --- 2. Ensure Python 3.10+ is present. ------------------------------------
+# --- 2. Ensure Python 3.10-3.14 is present. -------------------------------
 PYTHON_BIN="${PYTHON:-python3}"
 if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
     echo "Error: python3 is not installed or not on PATH." >&2
-    echo "Install Python 3.10+ and try again." >&2
+    echo "Install Python 3.10-3.14 and try again." >&2
     exit 1
 fi
 

@@ -3,7 +3,7 @@ REM Build the Windows release archive.
 REM
 REM Produces bluecli-<VERSION>-windows-x64.zip in the project root.
 REM Contents: source tree + shim wheels + Windows-flavor bundled binaries.
-REM End user needs Python 3.10+ on PATH; the launcher handles venv on first run.
+REM End user needs Python 3.10-3.14 on PATH; the launcher handles venv on first run.
 
 SETLOCAL EnableDelayedExpansion
 
@@ -51,7 +51,7 @@ echo =============================================
 echo.
 echo Requirements
 echo ------------
-echo   - Python 3.10 or newer ^(install from https://www.python.org/^,
+echo   - Python 3.10-3.14 ^(install from https://www.python.org/^,
 echo     tick "Add Python to PATH" during setup^)
 echo   - Administrator rights ^(the launcher requests them automatically^)
 echo   - That's it. WireGuard, v2ray, tun2socks and wintun are bundled.

@@ -27,7 +27,7 @@ goto ensure_venv
 
 :need_python
 echo Error: Python is not installed or not on PATH.
-echo Install Python 3.10+ from https://www.python.org/downloads/ and tick "Add Python to PATH".
+echo Install Python 3.10-3.14 from https://www.python.org/downloads/ and tick "Add Python to PATH".
 pause
 exit /b 1
 

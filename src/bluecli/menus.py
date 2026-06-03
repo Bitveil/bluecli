@@ -29,7 +29,8 @@ from .chain import (
 from .i18n import t
 from .vpn import NodeHandshakeError, VpnError, v2ray, wireguard
 
-SATOSHI = 1_000_000  # udvpn → DVPN
+SATOSHI = 1_000_000  # 1 P2P = 1_000_000 udvpn (base denom stays "udvpn")
+TICKER = "P2P"       # display symbol for the token (was "DVPN" before the rebrand)
 
 
 def _pause() -> None:
@@ -241,6 +242,7 @@ def browse_nodes(
     if nodes is None:
         return  # already reported the error and paused
 
+    denom = client.denom  # wallet's denom — picks which listed price we show
     per_page = 20
     filter_text = ""
     visible = nodes
@@ -258,7 +260,7 @@ def browse_nodes(
             ui.info(ui.dim(t("nodes.filter_active", filter_text, len(visible))))
         ui.info(t("nodes.header"))
         for i, n in enumerate(chunk, start=page * per_page + 1):
-            ui.info(_format_node_row(i, n))
+            ui.info(_format_node_row(i, n, denom))
         ui.info("")
         ui.info(t("nodes.page", page + 1, total_pages))
         choice = ui.prompt(t("nodes.prompt.choice"))
@@ -267,6 +269,10 @@ def browse_nodes(
             page = min(page + 1, total_pages - 1)
         elif choice_lc == "p":
             page = max(page - 1, 0)
+        elif choice_lc in ("r", "refresh"):
+            nodes = _refresh_node_list(cache, client, nodes)
+            visible = _filter_nodes(nodes, filter_text) if filter_text else nodes
+            page = 0
         elif choice_lc.startswith("g"):
             # `g<n>` (or bare `g` then a prompt) jumps straight to page n,
             # so long lists don't have to be paged through one at a time.
@@ -335,17 +341,51 @@ def _load_browseable_nodes(
                 _pause()
                 return None
 
-    # Filter to nodes the user can actually connect to.
-    browseable = [
-        n for n in nodes
-        if n.node_type in (NODE_TYPE_WIREGUARD, NODE_TYPE_V2RAY) and n.remote_url
-    ]
-    browseable.sort(key=lambda n: (n.country, n.moniker))
+    browseable = _browseable(nodes)
     if not browseable:
         ui.warn(t("nodes.none"))
         _pause()
         return None
     return browseable
+
+
+def _browseable(nodes: list) -> list:
+    """Keep only nodes the user can actually connect to (WireGuard/V2Ray that
+    advertise a remote URL), sorted by country then moniker. Shared by the
+    initial load and the manual refresh so both present an identical list."""
+    out = [
+        n for n in nodes
+        if n.node_type in (NODE_TYPE_WIREGUARD, NODE_TYPE_V2RAY) and n.remote_url
+    ]
+    out.sort(key=lambda n: (n.country, n.moniker))
+    return out
+
+
+def _refresh_node_list(
+    cache: "Optional[node_cache.NodeCache]",
+    client: ChainClient,
+    current: list,
+) -> list:
+    """Handle a user-requested refresh from the browser. Mutually exclusive with
+    the background refresh: if one is already running, tell the user to wait and
+    keep the current list; otherwise run it now (in this thread) and return the
+    fresh, browseable list. Returns `current` unchanged on a busy or failed
+    refresh."""
+    ui.info(t("nodes.refreshing"))
+    if cache is not None:
+        if not cache.refresh_now():
+            ui.warn(t("nodes.refresh_in_progress"))
+            _pause()
+            return current
+        return _browseable(cache.get(wait_timeout=0.0)) or current
+    # No cache (defensive fallback): synchronous one-off fetch.
+    try:
+        fresh = client.list_active_nodes()
+    except Exception as e:
+        ui.error(t("common.error", str(e)))
+        _pause()
+        return current
+    return _browseable(fresh) or current
 
 
 def _filter_nodes(nodes: list, query: str) -> list:
@@ -809,13 +849,14 @@ def multihop_menu(
         _pause()
         return
 
+    denom = client.denom
     ui.header(t("multihop.title"))
     ui.info(ui.dim(t("multihop.intro")))
-    entry = _pick_multihop_node(eligible, "multihop.prompt.entry")
+    entry = _pick_multihop_node(eligible, "multihop.prompt.entry", denom)
     if entry is None:
         return
     remaining = [n for n in eligible if n.address != entry.address]
-    exit_node = _pick_multihop_node(remaining, "multihop.prompt.exit")
+    exit_node = _pick_multihop_node(remaining, "multihop.prompt.exit", denom)
     if exit_node is None:
         return
 
@@ -828,10 +869,10 @@ def multihop_menu(
     _bring_up_multihop(unlocked, client, entry, exit_node, by_hours=by_hours, amount=amount)
 
 
-def _pick_multihop_node(nodes: list, prompt_key: str):
+def _pick_multihop_node(nodes: list, prompt_key: str, denom: str):
     """List the candidates and return the picked NodeInfo, or None to abort."""
     for i, n in enumerate(nodes, start=1):
-        ui.info(_format_node_row(i, n))
+        ui.info(_format_node_row(i, n, denom))
     raw = ui.prompt(t(prompt_key)).strip().lower()
     if raw in ("b", "back", ""):
         return None
@@ -1492,30 +1533,35 @@ def settings_menu() -> bool:
 # --------------------------------------------------------------------------
 
 
-def _format_node_row(idx: int, n: NodeInfo) -> str:
-    # Try to find a DVPN gigabyte price; that's what 99% of users care about.
-    udvpn_price = next(
-        (p["quote_value"] for p in n.gigabyte_prices if p.get("denom") == "udvpn"),
-        None,
-    )
-    if udvpn_price is not None:
+def _format_price(prices: list[dict], denom: str) -> str:
+    """Human-readable price for the wallet's denom (e.g. '0.250 P2P'). Falls
+    back to any denom the node lists, or '—' if it lists none. Shared by the
+    per-GB and per-hour columns so both format identically."""
+    quote = next((p["quote_value"] for p in prices if p.get("denom") == denom), None)
+    if quote is not None:
         try:
-            price_str = f"{int(udvpn_price) / SATOSHI:.3f} DVPN"
+            return f"{int(quote) / SATOSHI:.3f} {TICKER}"
         except (ValueError, TypeError):
-            price_str = str(udvpn_price)
-    elif n.gigabyte_prices:
-        # Fall back to any price the node accepts.
-        p = n.gigabyte_prices[0]
-        price_str = f"{p.get('quote_value', '?')} {p.get('denom', '?')}"
-    else:
-        price_str = "—"
+            return str(quote)
+    if prices:
+        p = prices[0]
+        return f"{p.get('quote_value', '?')} {p.get('denom', '?')}"
+    return "—"
+
+
+def _format_node_row(idx: int, n: NodeInfo, denom: str) -> str:
+    gb_price = _format_price(n.gigabyte_prices, denom)
+    hr_price = _format_price(n.hourly_prices, denom)
     country = (n.country or "—")[:18]
     moniker = (n.moniker or "—")[:28]
-    return f"  {idx:>2}  {country:<20}  {moniker:<28}  {n.type_name:<10}  {price_str}"
+    return (
+        f"  {idx:>2}  {country:<20}  {moniker:<28}  "
+        f"{n.type_name:<10}  {gb_price:<11}  {hr_price}"
+    )
 
 
 def _format_balance(client: ChainClient) -> str:
     udvpn = client.get_balance()
     if udvpn is None:
         return t("balance.not_on_chain")
-    return f"{udvpn / SATOSHI:.6f} DVPN"
+    return f"{udvpn / SATOSHI:.6f} {TICKER}"

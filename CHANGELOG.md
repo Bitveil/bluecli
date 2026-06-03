@@ -5,6 +5,31 @@ All notable changes to BlueCLI are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-03
+
+### Changed
+
+- **Token ticker is now `P2P`** (was `DVPN`) everywhere it is shown to the
+  user — node prices, balance, connection and multi-hop confirmations, and
+  funding prompts — following the network's rebrand. The on-chain base
+  denomination is unchanged.
+
+### Added
+
+- **Per-hour price in the node browser.** The node list now shows each node's
+  hourly price next to its per-gigabyte price, so duration-based plans are
+  visible at a glance.
+- **Manual refresh in the node browser.** Press `r` to refresh the node list on
+  demand. It is mutually exclusive with the automatic background refresh: if a
+  refresh is already running you are told to wait, otherwise yours runs — the
+  two never overlap.
+
+### Documentation
+
+- Supported Python versions corrected to **3.10–3.14** (the range for which all
+  native dependencies publish prebuilt wheels) instead of the over-broad
+  "3.10+".
+
 ## [1.0.1] - 2026-06-01
 
 ### Fixed

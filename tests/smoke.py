@@ -724,42 +724,76 @@ def test_node_cache_serves_disk_seed():
 
 
 def test_format_node_row_with_dict_prices():
-    """Regression: NodeInfo.gigabyte_prices is `list[dict]`, not protobuf.
-    Every code path in the formatter must use dict-key access.
-    """
+    """NodeInfo prices are list[dict] (not protobuf), and the row must show BOTH
+    the per-GB and per-hour price for the wallet's denom, formatted with the P2P
+    ticker. Every code path uses dict-key access."""
     from bluecli.chain import NodeInfo, NODE_TYPE_WIREGUARD, NODE_TYPE_V2RAY
     from bluecli.menus import _format_node_row
 
-    # Branch 1: udvpn price present → shown as DVPN
+    # Branch 1: udvpn prices present (GB and hourly) → both shown as P2P.
     n = NodeInfo(
         address="sentnode1aaa", moniker="VPN-A", country="Italy",
         remote_url="https://1.1.1.1:9933", node_type=NODE_TYPE_WIREGUARD,
         gigabyte_prices=[{"denom": "udvpn", "base_value": "0", "quote_value": "25000000"}],
-        hourly_prices=[],
+        hourly_prices=[{"denom": "udvpn", "base_value": "0", "quote_value": "500000"}],
     )
-    row = _format_node_row(1, n)
-    assert "25.000 DVPN" in row, row
+    row = _format_node_row(1, n, "udvpn")
+    assert "25.000 P2P" in row, row          # per-GB column
+    assert "0.500 P2P" in row, row           # per-hour column
     assert "Italy" in row and "VPN-A" in row and "wireguard" in row
 
-    # Branch 2: no udvpn, only IBC → fallback to raw "<value> <denom>"
+    # Branch 2: no udvpn, only IBC → fallback to raw "<value> <denom>";
+    # hourly absent → em-dash.
     n = NodeInfo(
         address="sentnode1bbb", moniker="VPN-B", country="Germany",
         remote_url="https://2.2.2.2:9933", node_type=NODE_TYPE_V2RAY,
         gigabyte_prices=[{"denom": "ibc/SOMEHASH", "base_value": "0", "quote_value": "5000"}],
         hourly_prices=[],
     )
-    row = _format_node_row(2, n)
+    row = _format_node_row(2, n, "udvpn")
     assert "5000 ibc/SOMEHASH" in row, row
-    assert "DVPN" not in row, row
+    assert "P2P" not in row, row
+    assert "—" in row, row                   # empty hourly column
 
-    # Branch 3: no prices at all → em-dash
+    # Branch 3: no prices at all → em-dash for both price columns.
     n = NodeInfo(
         address="sentnode1ccc", moniker="VPN-C", country="",
         remote_url="https://3.3.3.3:9933", node_type=NODE_TYPE_WIREGUARD,
         gigabyte_prices=[], hourly_prices=[],
     )
-    row = _format_node_row(3, n)
-    assert "—" in row, row
+    row = _format_node_row(3, n, "udvpn")
+    assert row.count("—") >= 2, row          # GB and hourly both em-dashed
+
+
+def test_pick_multihop_node_renders_rows_and_returns_choice():
+    """Regression: the multihop node picker must call the row formatter with the
+    SAME signature as the browser — (idx, node, denom). A missing `denom` arg
+    crashed the multihop menu in the wild; this exercises that exact path with
+    the real formatter so any signature drift fails here, not for the user."""
+    from bluecli import menus
+    from bluecli import ui as _ui
+    from bluecli.chain import NodeInfo, NODE_TYPE_V2RAY
+
+    nodes = [
+        NodeInfo(address="n1", moniker="Entry", country="IT", remote_url="https://1:1",
+                 node_type=NODE_TYPE_V2RAY,
+                 gigabyte_prices=[{"denom": "udvpn", "base_value": "0", "quote_value": "25000000"}],
+                 hourly_prices=[{"denom": "udvpn", "base_value": "0", "quote_value": "500000"}]),
+        NodeInfo(address="n2", moniker="Exit", country="DE", remote_url="https://2:1",
+                 node_type=NODE_TYPE_V2RAY, gigabyte_prices=[], hourly_prices=[]),
+    ]
+    rendered: list = []
+    saved = (_ui.info, _ui.prompt, _ui.error)
+    _ui.info = lambda m="", *a, **k: rendered.append(str(m))
+    _ui.prompt = lambda *a, **k: "1"
+    _ui.error = lambda *a, **k: None
+    try:
+        picked = menus._pick_multihop_node(nodes, "multihop.prompt.entry", "udvpn")
+    finally:
+        (_ui.info, _ui.prompt, _ui.error) = saved
+    assert picked is nodes[0], picked
+    blob = "\n".join(rendered)
+    assert "Entry" in blob and "25.000 P2P" in blob, blob  # rendered with denom + ticker
 
 
 def test_node_list_age_label():
@@ -1137,6 +1171,97 @@ def test_node_cache_records_fetch_errors():
         assert "simulated gRPC outage" in err, err
     finally:
         cache.stop()
+
+
+def test_node_cache_refresh_now_runs_and_is_mutually_exclusive():
+    """A user-triggered refresh runs the fetch in the calling thread and returns
+    True; while a refresh is already in flight (the shared lock is held), a
+    second refresh_now() must return False WITHOUT fetching. That gate is how
+    the browser says 'already in progress' and how manual and background
+    refreshes stay one-at-a-time."""
+    from bluecli.node_cache import NodeCache, _CACHE_FILE
+    from bluecli.chain import NodeInfo, NODE_TYPE_V2RAY
+    _CACHE_FILE.unlink(missing_ok=True)
+
+    sample = [NodeInfo(address="sentnode1x", moniker="M", country="IT",
+                       remote_url="https://1.2.3.4:1", node_type=NODE_TYPE_V2RAY,
+                       gigabyte_prices=[], hourly_prices=[])]
+    calls = {"n": 0}
+
+    def fetch():
+        calls["n"] += 1
+        return sample
+
+    cache = NodeCache(fetch=fetch)  # NOT started: no background loop in this test
+    # 1) Free → runs once, updates the cache, returns True.
+    assert cache.refresh_now() is True
+    assert calls["n"] == 1
+    assert cache.get(wait_timeout=0.0) == sample
+    # 2) A refresh already in flight (lock held) → busy, no extra fetch.
+    assert cache._refresh_lock.acquire(blocking=False) is True
+    try:
+        assert cache.refresh_now() is False
+        assert calls["n"] == 1, "must not fetch while a refresh is in progress"
+    finally:
+        cache._refresh_lock.release()
+
+
+def test_refresh_node_list_reports_busy_and_keeps_list():
+    """Browser refresh helper: when the cache reports a refresh already running,
+    warn the user and keep the current list unchanged (no silent swap)."""
+    from bluecli import menus
+    from bluecli import ui as _ui
+
+    class _BusyCache:
+        def refresh_now(self):
+            return False
+
+        def get(self, **k):
+            return []  # would replace the list if (wrongly) consulted
+
+    warns: list = []
+    saved = (_ui.warn, _ui.info, menus._pause)
+    _ui.warn = lambda m, *a, **k: warns.append(str(m))
+    _ui.info = lambda *a, **k: None
+    menus._pause = lambda *a, **k: None
+    current = ["NODE_A", "NODE_B"]
+    try:
+        out = menus._refresh_node_list(_BusyCache(), client=None, current=current)
+    finally:
+        (_ui.warn, _ui.info, menus._pause) = saved
+    assert out is current, "a busy refresh must keep the current list"
+    assert warns, "the user must be told a refresh is already in progress"
+
+
+def test_refresh_node_list_runs_and_returns_browseable():
+    """Browser refresh helper: when not busy, run the refresh and return the
+    fresh list filtered to connectable nodes and sorted by country/moniker."""
+    from bluecli import menus
+    from bluecli import ui as _ui
+    from bluecli.chain import NodeInfo, NODE_TYPE_V2RAY
+
+    fresh = [
+        NodeInfo(address="n2", moniker="B", country="DE", remote_url="https://2:1",
+                 node_type=NODE_TYPE_V2RAY, gigabyte_prices=[], hourly_prices=[]),
+        NodeInfo(address="n1", moniker="A", country="AT", remote_url="https://1:1",
+                 node_type=NODE_TYPE_V2RAY, gigabyte_prices=[], hourly_prices=[]),
+    ]
+
+    class _OkCache:
+        def refresh_now(self):
+            return True
+
+        def get(self, **k):
+            return list(fresh)
+
+    saved = (_ui.info, menus._pause)
+    _ui.info = lambda *a, **k: None
+    menus._pause = lambda *a, **k: None
+    try:
+        out = menus._refresh_node_list(_OkCache(), client=None, current=[])
+    finally:
+        (_ui.info, menus._pause) = saved
+    assert [n.address for n in out] == ["n1", "n2"], out  # AT/A before DE/B
 
 
 def test_strip_runtime_state_preserves_session_creds():
@@ -2875,8 +3000,12 @@ def main() -> int:
         ("chain.price_dict_roundtrip", test_price_dict_roundtrip),
         ("node_cache.disk_seed", test_node_cache_serves_disk_seed),
         ("menus.format_node_row", test_format_node_row_with_dict_prices),
+        ("menus.pick_multihop_node_renders", test_pick_multihop_node_renders_rows_and_returns_choice),
         ("node_cache.signals_done_on_empty", test_node_cache_signals_done_even_when_fetch_returns_empty),
         ("node_cache.records_fetch_errors", test_node_cache_records_fetch_errors),
+        ("node_cache.refresh_now_mutual_exclusion", test_node_cache_refresh_now_runs_and_is_mutually_exclusive),
+        ("menus.refresh_node_list_busy", test_refresh_node_list_reports_busy_and_keeps_list),
+        ("menus.refresh_node_list_runs", test_refresh_node_list_runs_and_returns_browseable),
         ("vpn.wireguard.creds_roundtrip", test_wg_credentials_state_roundtrip),
         ("vpn.v2ray.creds_roundtrip", test_v2_credentials_state_roundtrip),
         ("config.strip_runtime_preserves_creds", test_strip_runtime_state_preserves_session_creds),

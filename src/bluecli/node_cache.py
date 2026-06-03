@@ -38,6 +38,9 @@ class NodeCache:
     def __init__(self, fetch: Callable[[], list[NodeInfo]]) -> None:
         self._fetch = fetch
         self._lock = threading.Lock()
+        # Serializes the actual fetch so a user-triggered refresh and the
+        # background refresh never run at the same time — exactly one at a time.
+        self._refresh_lock = threading.Lock()
         # `_done` is set whenever a refresh ATTEMPT completes — whether it
         # found nodes, found nothing, or raised. Callers waiting on .get()
         # are released either way so we never hang on an empty network or
@@ -96,27 +99,51 @@ class NodeCache:
         with self._lock:
             return self._last_refresh
 
+    def refresh_now(self) -> bool:
+        """Run a refresh immediately, IN THE CALLING THREAD, if one isn't
+        already running. Returns True if the refresh ran (cache updated), or
+        False if a refresh — background or manual — was already in flight, in
+        which case the caller should tell the user to wait. The shared
+        `_refresh_lock` guarantees this never overlaps the background loop:
+        exactly one fetch runs at a time."""
+        if not self._refresh_lock.acquire(blocking=False):
+            return False  # a refresh is already in progress
+        try:
+            self._refresh_once()
+        finally:
+            self._refresh_lock.release()
+        return True
+
     # -- Internals ---------------------------------------------------------
 
     def _loop(self) -> None:
         while not self._stop.is_set():
-            err = None
-            fresh: Optional[list[NodeInfo]] = None
-            try:
-                fresh = self._fetch()
-            except Exception as e:
-                err = f"{type(e).__name__}: {e}"
-            with self._lock:
-                if fresh is not None:
-                    self._nodes = list(fresh)
-                    self._last_refresh = time.time()
-                self._last_error = err
-            if fresh:
-                self._save_to_disk(fresh)
-            # ALWAYS signal "attempt complete" — even on error or empty —
-            # so callers blocked in .get() don't sit on the timeout.
-            self._done.set()
+            # Hold the refresh lock for the whole fetch so a user-triggered
+            # refresh can't overlap this one (and vice versa).
+            with self._refresh_lock:
+                self._refresh_once()
             self._stop.wait(REFRESH_INTERVAL)
+
+    def _refresh_once(self) -> None:
+        """One fetch + state update + disk save. The CALLER must hold
+        `_refresh_lock` (the background loop and `refresh_now` both do), so
+        only one of these runs at any moment."""
+        err = None
+        fresh: Optional[list[NodeInfo]] = None
+        try:
+            fresh = self._fetch()
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+        with self._lock:
+            if fresh is not None:
+                self._nodes = list(fresh)
+                self._last_refresh = time.time()
+            self._last_error = err
+        if fresh:
+            self._save_to_disk(fresh)
+        # ALWAYS signal "attempt complete" — even on error or empty —
+        # so callers blocked in .get() don't sit on the timeout.
+        self._done.set()
 
     def _load_from_disk(self) -> None:
         if not _CACHE_FILE.is_file():

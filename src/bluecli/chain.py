@@ -155,7 +155,7 @@ class ChainError(Exception):
 class WalletNotOnChainError(ChainError):
     """Raised when we try to sign a tx for a wallet that has never been funded.
 
-    The caller should tell the user to send any amount of DVPN to their
+    The caller should tell the user to send any amount of P2P to their
     address first.
     """
 
