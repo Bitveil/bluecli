@@ -605,6 +605,141 @@ def test_parse_node_response_rejects_garbage():
     assert _parse_node_response("not a dict") == {}
 
 
+def test_parse_node_response_declared_transports():
+    """dvpnx >= 9.0.0 declares per-inbound v2ray metadata on the info
+    endpoint; transport enums arrive as Go byte values (7=tcp, 8=websocket).
+    We must parse those, tolerate string variants, and treat anything
+    unreadable as 'not declared' (None) so eligibility falls back safely."""
+    from bluecli.chain import _parse_node_response, _declared_transports
+
+    def result_with(metadata):
+        return {"success": True, "result": {
+            "service_type": "v2ray", "moniker": "N",
+            "location": {"country": "Italy"},
+            "version": {"commit": "053a819", "tag": "9.0.0"},
+            "service_metadata": metadata,
+        }}
+
+    # 9.0.0 shape, int enums: tcp (7) + websocket (8); unknown (99) skipped.
+    parsed = _parse_node_response(result_with([
+        {"port": "10000", "proxy_protocol": 2, "transport_protocol": 7,
+         "transport_security": 2, "tls_pin": "sha256:abc"},
+        {"port": "10001", "proxy_protocol": 1, "transport_protocol": 8,
+         "transport_security": 1, "tls_pin": ""},
+        {"port": "10002", "proxy_protocol": 2, "transport_protocol": 99,
+         "transport_security": 1, "tls_pin": ""},
+    ]))
+    assert parsed["transports"] == ["tcp", "websocket"], parsed
+
+    # String variant (same vocabulary the handshake metadata uses), "ws" alias.
+    parsed = _parse_node_response(result_with([
+        {"transport_protocol": "TCP"}, {"transport_protocol": "ws"},
+    ]))
+    assert parsed["transports"] == ["tcp", "websocket"], parsed
+
+    # Verbatim payloads captured from live mainnet nodes (2026-07): a 9.0.0
+    # node declaring grpc(3)+tcp(7) inbounds, and an 8.3.1 node with no
+    # service_metadata at all. These pin the real wire format.
+    taco = {"success": True, "result": {
+        "addr": "sentnode1ny0rx6hgnpwyludyygw4e47gnqv9sjtnl3r7zw",
+        "downlink": "68163516", "handshake_dns": False,
+        "location": {"city": "Worcester", "country": "United Kingdom",
+                     "country_code": "GB", "latitude": 52.1941, "longitude": -2.21905},
+        "moniker": "taco-GB-31-V2", "peers": 5, "service_type": "v2ray",
+        "service_metadata": [
+            {"port": "", "proxy_protocol": 2, "transport_protocol": 3,
+             "transport_security": 2, "tls_pin": ""},
+            {"port": "", "proxy_protocol": 1, "transport_protocol": 7,
+             "transport_security": 2, "tls_pin": ""},
+        ],
+        "uplink": "22812908",
+        "version": {"commit": "9cb7ac9122358aebed599f8740b46af810917b98", "tag": "9.0.0"},
+    }}
+    parsed = _parse_node_response(taco)
+    assert parsed["transports"] == ["grpc", "tcp"], parsed
+    assert parsed["country"] == "United Kingdom"
+
+    # 8.3.1 verbatim: no service_metadata key → None (legacy, not declared).
+    legacy = {"success": True, "result": {
+        "addr": "sentnode16tr2xa9mcpkmylk0kafc4cgelw6vlayzlyr5ey",
+        "downlink": "8012606", "handshake_dns": False,
+        "location": {"city": "Mumbai", "country": "India", "country_code": "IN",
+                     "latitude": 19.0748, "longitude": 72.8856},
+        "moniker": "0_Premium_Service_100G_Nibiru70", "peers": 84,
+        "service_type": "v2ray", "uplink": "6122205",
+        "version": {"commit": "f2bdf6d00f673b852d5613f849887f4367686eb2", "tag": "8.3.1"},
+    }}
+    assert _parse_node_response(legacy)["transports"] is None
+
+    # Unreadable declarations → None, never a guess and never a crash.
+    for bad in ({}, "tcp", 7, [], [{"transport_protocol": 0}],
+                [{"transport_protocol": True}], ["tcp"], [{"other": 1}],
+                [{"transport_protocol": None}]):
+        assert _declared_transports(bad) is None, bad
+
+
+def test_node_cache_roundtrips_declared_transports():
+    """declared_transports must survive the disk cache roundtrip (save via
+    asdict, load via NodeInfo(**item)) for both declaring and legacy nodes —
+    a stale-but-fresh cache file must not erase what a node declared."""
+    from bluecli import config as cfg
+    from bluecli.chain import NodeInfo, NODE_TYPE_V2RAY
+    from bluecli.node_cache import NodeCache, _CACHE_FILE
+
+    cfg.ensure_dir()
+    _CACHE_FILE.unlink(missing_ok=True)
+
+    declaring = NodeInfo(
+        address="sentnode1new", moniker="New", country="IT",
+        remote_url="https://1:1", node_type=NODE_TYPE_V2RAY,
+        gigabyte_prices=[], hourly_prices=[],
+        declared_transports=["tcp", "websocket"],
+    )
+    legacy = NodeInfo(
+        address="sentnode1old", moniker="Old", country="DE",
+        remote_url="https://2:1", node_type=NODE_TYPE_V2RAY,
+        gigabyte_prices=[], hourly_prices=[],
+    )
+    assert legacy.declared_transports is None  # field defaults to None
+
+    writer = NodeCache(fetch=lambda: [])  # not started: no background thread
+    writer._save_to_disk([declaring, legacy])
+    reader = NodeCache(fetch=lambda: [])
+    reader._load_from_disk()
+    loaded = {n.address: n for n in reader.get(wait_timeout=0.0)}
+    assert loaded["sentnode1new"].declared_transports == ["tcp", "websocket"]
+    assert loaded["sentnode1old"].declared_transports is None
+    _CACHE_FILE.unlink(missing_ok=True)
+
+
+def test_multihop_eligible_native_first():
+    """A declaring node decides on its declaration ALONE (fresher than any
+    cached handshake — even a cache hit must not override a no-tcp
+    declaration); the handshake-learned cache only speaks for legacy nodes
+    that don't declare. This is the seam that lets the cache be deleted once
+    the network migrates."""
+    from bluecli.chain import NodeInfo, NODE_TYPE_V2RAY
+    from bluecli.menus import _multihop_eligible
+
+    def node(addr, declared):
+        return NodeInfo(
+            address=addr, moniker="m", country="c", remote_url="https://x:1",
+            node_type=NODE_TYPE_V2RAY, gigabyte_prices=[], hourly_prices=[],
+            declared_transports=declared,
+        )
+
+    cached = {"sentnode1cached"}
+    # Declares tcp, never handshaked → eligible natively, no cache needed.
+    assert _multihop_eligible(node("sentnode1a", ["tcp", "grpc"]), cached) is True
+    # Declares only quic, even though an old handshake cached it as tcp →
+    # NOT eligible: the fresh declaration wins over stale cache.
+    assert _multihop_eligible(node("sentnode1cached", ["quic"]), cached) is False
+    # Legacy (no declaration) + cached as tcp → eligible via fallback.
+    assert _multihop_eligible(node("sentnode1cached", None), cached) is True
+    # Legacy + never handshaked → not eligible (same as today).
+    assert _multihop_eligible(node("sentnode1b", None), cached) is False
+
+
 def test_parse_session_any_node_wrapper():
     """Sessions on chain are sentinel.node.v3.Session (or .subscription.v3.Session)
     that wrap BaseSession at field 1. Verify our parser unwraps correctly."""
@@ -2995,6 +3130,9 @@ def main() -> int:
         ("chain.parse_response_real_v2ray", test_parse_node_response_real_v2ray_shape),
         ("chain.parse_response_wireguard", test_parse_node_response_wireguard_variant),
         ("chain.parse_response_rejects_garbage", test_parse_node_response_rejects_garbage),
+        ("chain.parse_response_declared_transports", test_parse_node_response_declared_transports),
+        ("node_cache.declared_transports_roundtrip", test_node_cache_roundtrips_declared_transports),
+        ("menus.multihop_eligible_native_first", test_multihop_eligible_native_first),
         ("chain.parse_session_any_node", test_parse_session_any_node_wrapper),
         ("chain.parse_session_any_subscription", test_parse_session_any_subscription_wrapper),
         ("chain.price_dict_roundtrip", test_price_dict_roundtrip),

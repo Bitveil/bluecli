@@ -1,21 +1,18 @@
-"""Local cache of each V2Ray node's offered transports.
+"""Local cache of each V2Ray node's offered transports — LEGACY FALLBACK.
 
-Why this exists: multihop chaining needs both nodes to offer a TCP endpoint
-(the conservative compatibility requirement), but a node's transport is only
-revealed by a paid handshake — it's absent from both the chain node list and
-the node's public status endpoint. So we record what we learn for free: every
-time BlueCLI handshakes a V2Ray node (single- or multi-hop), we cache the set
-of transports that node offered. Over normal use the cache fills with the
-nodes the user actually touches, and multihop can then offer them as
-entry/exit candidates without a fresh paid probe.
+Nodes on dvpnx >= 9.0.0 declare their v2ray transports on the public info
+endpoint, which BlueCLI reads for free during the regular node probe — that
+declaration is the primary eligibility source for multihop (see
+menus._multihop_eligible). This cache covers the nodes that predate it
+(dvpnx <= 8.3.1), whose transport is only revealed by a paid handshake: every
+time BlueCLI handshakes a V2Ray node we record the transports it offered, so
+legacy nodes the user has touched become multihop candidates too.
 
-Source-of-truth ordering: this cache is the *fallback*. When the community
-API lands it becomes the primary source and this stays as the offline
-fallback. Both will expose the same `eligible_addresses()` shape, so the menu
-layer never has to know which one answered.
+Once the network has fully migrated to declaring nodes, delete this module
+and its record()/eligible_addresses() call sites — nothing else gates on it.
 
 Everything here is best-effort: a missing or unreadable cache simply means
-"no known candidates", never a crash on the connect path.
+"no known legacy candidates", never a crash on the connect path.
 """
 
 from __future__ import annotations

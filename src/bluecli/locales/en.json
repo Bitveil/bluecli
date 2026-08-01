@@ -61,7 +61,7 @@
   "multihop.confirm": "Chain {0} (entry) -> {1} (exit) for {2} each. Total {3} P2P. Proceed?",
   "multihop.starting_hop": "Starting {0} hop: {1}...",
   "multihop.connected": "Multihop connected: {0}",
-  "multihop.not_enough_nodes": "Not enough known TCP V2Ray nodes for a chain yet. Connect to a few V2Ray nodes normally first (that fills the local cache), then come back.",
+  "multihop.not_enough_nodes": "Not enough TCP V2Ray nodes for a chain yet. Nodes on recent software declare TCP support automatically (picked up when the node list refreshes); for older nodes, connect to them normally once so BlueCLI learns what they offer, then come back.",
   "multihop.resume_prompt": "Resume the existing chain ({0}) without paying for new sessions?",
   "multihop.partial": "Some sessions were started but the chain didn't come up. Sessions still active: {0}. End them under 'My active sessions', or retry from 'Multihop' to resume.",
   "connect.fetching_creds": "Fetching credentials from the node...",

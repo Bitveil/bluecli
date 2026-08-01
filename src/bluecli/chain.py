@@ -46,6 +46,11 @@ class NodeInfo:
     node_type: int  # 1 = wireguard, 2 = v2ray
     gigabyte_prices: list[dict]
     hourly_prices: list[dict]
+    # Transports the node itself declares on its public info endpoint
+    # (dvpnx >= 9.0.0), e.g. ["tcp", "websocket"]. None means the node
+    # doesn't declare (dvpnx <= 8.3.1) or the declaration was unreadable —
+    # callers then fall back to what past handshakes taught us.
+    declared_transports: Optional[list] = None
 
     @property
     def type_name(self) -> str:
@@ -518,10 +523,61 @@ def _build_node_info(node: Any, info: dict) -> Optional[NodeInfo]:
         node_type=int(info["type"]),
         gigabyte_prices=_proto_prices_to_dicts(node.gigabyte_prices),
         hourly_prices=_proto_prices_to_dicts(node.hourly_prices),
+        declared_transports=info.get("transports"),
     )
 
 
 _SERVICE_TYPE_TO_INT = {"wireguard": NODE_TYPE_WIREGUARD, "v2ray": NODE_TYPE_V2RAY}
+
+# dvpnx >= 9.0.0 serialises v2ray transport enums as their Go byte values
+# (encoding/json has no custom marshaller for them). Order mirrors the
+# TransportProtocol iota in sentinel-go-sdk v2 — verify against the SDK if
+# a value ever looks off, and never guess an unknown one.
+_V2RAY_TRANSPORT_BY_ENUM = {
+    1: "domainsocket",
+    2: "gun",
+    3: "grpc",
+    4: "http",
+    5: "mkcp",
+    6: "quic",
+    7: "tcp",
+    8: "websocket",
+}
+
+
+def _declared_transports(metadata: Any) -> Optional[list]:
+    """Transport names a node declares in its info `service_metadata`.
+
+    dvpnx >= 9.0.0 nodes list one entry per configured v2ray inbound, each
+    with a `transport_protocol` — the Go byte enum (int) on the wire, though
+    a string is accepted too for robustness (it's the format the handshake
+    metadata already uses). Returns a sorted, deduped, NON-EMPTY list of the
+    transports we recognised, or None when the node doesn't declare or the
+    declaration is unreadable (absent/malformed/nothing recognised) — the
+    caller then falls back to handshake-learned knowledge, and a real
+    transport mismatch is still caught at tunnel bring-up.
+    """
+    if not isinstance(metadata, list):
+        return None
+    names: set = set()
+    for entry in metadata:
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get("transport_protocol")
+        if isinstance(raw, bool):  # bool is an int subclass; never a transport
+            continue
+        if isinstance(raw, int):
+            name = _V2RAY_TRANSPORT_BY_ENUM.get(raw)
+        elif isinstance(raw, str):
+            low = raw.strip().lower()
+            name = "websocket" if low == "ws" else low
+            if name not in _V2RAY_TRANSPORT_BY_ENUM.values():
+                name = None
+        else:
+            name = None
+        if name:
+            names.add(name)
+    return sorted(names) if names else None
 
 
 def _parse_node_response(data: Any) -> dict:
@@ -553,6 +609,9 @@ def _parse_node_response(data: Any) -> dict:
         "type": type_int,
         "moniker": str(result.get("moniker", "")),
         "country": str(location.get("country", "")),
+        # Present on dvpnx >= 9.0.0, absent before: the node's own
+        # declaration of its v2ray transports (None when not declared).
+        "transports": _declared_transports(result.get("service_metadata")),
     }
 
 

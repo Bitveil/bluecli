@@ -799,6 +799,23 @@ def _chain_sessions_alive(hops: Any, active_ids) -> bool:
     return bool(ids) and ids <= set(active_ids)
 
 
+def _multihop_eligible(n: NodeInfo, cached_tcp_addrs: set) -> bool:
+    """TCP eligibility for chaining, native-first.
+
+    Nodes on dvpnx >= 9.0.0 declare their v2ray transports on the public
+    info endpoint — fetched for free by the regular node probe, before any
+    handshake — so for them the declaration alone decides (it's fresher
+    than anything a past handshake taught us). The handshake-learned
+    transport cache is consulted ONLY for legacy nodes that don't declare
+    (dvpnx <= 8.3.1). Once the network has fully migrated, delete the
+    fallback branch below and transport_cache with it — nothing else
+    gates on the cache.
+    """
+    if n.declared_transports is not None:
+        return "tcp" in n.declared_transports
+    return n.address in cached_tcp_addrs
+
+
 def multihop_menu(
     unlocked: wallet.Wallet,
     client: ChainClient,
@@ -806,11 +823,11 @@ def multihop_menu(
 ) -> None:
     """Build a two-hop V2Ray chain (entry -> exit).
 
-    Eligibility comes from the local transport cache, which is populated for
-    free by your past V2Ray connections: a node qualifies if it's V2Ray and
-    is known to offer a TCP endpoint (the conservative chaining requirement).
-    (A community API will become the primary source later; this cache is the
-    offline fallback today.)
+    A node qualifies if it's V2Ray and offers a TCP endpoint (the
+    conservative chaining requirement). That's decided natively from the
+    node's own declaration when it provides one (dvpnx >= 9.0.0), with the
+    handshake-learned transport cache as the fallback for older nodes —
+    see _multihop_eligible.
     """
     if _already_connected_guard():
         return
@@ -839,10 +856,10 @@ def multihop_menu(
     nodes = _load_browseable_nodes(client, cache)
     if nodes is None:
         return
-    eligible_addrs = transport_cache.eligible_addresses("tcp")
+    cached_tcp = transport_cache.eligible_addresses("tcp")
     eligible = [
         n for n in nodes
-        if n.node_type == NODE_TYPE_V2RAY and n.address in eligible_addrs
+        if n.node_type == NODE_TYPE_V2RAY and _multihop_eligible(n, cached_tcp)
     ]
     if len(eligible) < 2:
         ui.warn(t("multihop.not_enough_nodes"))

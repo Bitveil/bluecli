@@ -5,6 +5,20 @@ All notable changes to BlueCLI are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-07-30
+
+### Added
+
+- **Native multihop eligibility (dvpnx 9.0.0+).** Nodes running dvpnx 9.0.0
+  or newer declare their V2Ray transports on their public info endpoint;
+  BlueCLI now reads that declaration during the regular node-list probe —
+  before and without any paid handshake — so those nodes qualify for
+  multihop chaining out of the box. The handshake-learned transport cache
+  remains solely as a fallback for nodes still on older versions (their
+  transports are only revealed by connecting once), and is confined to a
+  single, documented seam so it can be removed once the network has fully
+  migrated.
+
 ## [1.1.0] - 2026-06-03
 
 ### Changed
