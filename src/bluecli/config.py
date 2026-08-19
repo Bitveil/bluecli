@@ -6,12 +6,13 @@ service. Removing the folder removes the software in its entirety.
 
 Layout at runtime:
   bluecli/
-  ├── bin/{wireguard,v2ray}/    bundled binaries (prepopulated)
+  ├── bin/{wireguard,v2ray,amneziawg}/  bundled binaries (prepopulated)
   ├── data/                      created on first launch, holds:
   │   ├── wallet.enc             encrypted wallet
   │   ├── config.json            network/preferences
   │   ├── state.json             current connection (only while connected)
   │   ├── wg-blue.conf           active WireGuard config (only while connected)
+  │   ├── awg-blue.conf          active AmneziaWG config (only while connected)
   │   └── v2ray.json             active V2Ray config (only while connected)
   └── venv/                      created on first launch by the start script
 
@@ -47,6 +48,7 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 STATE_FILE = CONFIG_DIR / "state.json"
 WG_CONF_FILE = CONFIG_DIR / "wg-blue.conf"
 V2RAY_CONF_FILE = CONFIG_DIR / "v2ray.json"
+AWG_CONF_FILE = CONFIG_DIR / "awg-blue.conf"
 
 
 def bin_path(tool: str, name: str) -> Path:
@@ -72,6 +74,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 # WireGuard interface name we always use. Predictable name = predictable cleanup.
 WG_INTERFACE = "wg-blue"
+
+# AmneziaWG interface name (userspace engine amneziawg-go + awg tool).
+AWG_INTERFACE = "awg-blue"
 
 
 def ensure_dir() -> None:
@@ -145,7 +150,7 @@ def clear_state() -> None:
 _RUNTIME_STATE_KEYS = (
     "backend", "interface", "config_path",
     "pid", "tun2socks_pid", "socks_port",
-    "tun_iface", "node_ip", "orig_gw",
+    "tun_iface", "tun_local_ip", "node_ip", "orig_gw",
 )
 
 

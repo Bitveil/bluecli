@@ -35,6 +35,9 @@ def _emergency_cleanup() -> None:
         elif state["backend"] == "wireguard":
             from .vpn import wireguard
             wireguard.disconnect(state)
+        elif state["backend"] == "amneziawg":
+            from .vpn import amneziawg
+            amneziawg.disconnect(state)
         cfg.strip_runtime_state()
     except Exception:
         pass

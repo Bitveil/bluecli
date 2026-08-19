@@ -5,6 +5,28 @@ All notable changes to BlueCLI are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-08-19
+
+### Added
+
+- **AmneziaWG support.** Connect to AmneziaWG nodes (DPI-resistant WireGuard)
+  with the same click-and-run experience as the other protocols. On Windows
+  the bundled official AmneziaWG client runs the tunnel as a service; on
+  Linux the bundled `amneziawg-go` userspace engine is used together with
+  the `awg` tool — no kernel module, no driver install. The node's
+  obfuscation parameters (S1-S4, H1-H4, optional I1-I5) are taken from the
+  handshake and validated against the protocol's ranges before use; junk
+  parameters are generated per connection. Sessions, reconnect after
+  restart, teardown, and emergency cleanup work exactly as for WireGuard
+  and V2Ray.
+
+### Improved
+
+- Clearer errors on Linux when a bundled binary has lost its execute bit
+  (a one-line `chmod +x` fix is suggested), and the AmneziaWG readiness
+  check now reports the probe's own error instead of misattributing the
+  failure to the engine.
+
 ## [1.2.0] - 2026-07-30
 
 ### Added

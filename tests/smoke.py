@@ -229,6 +229,224 @@ def test_wireguard_config_file_is_valid_ini():
     out.unlink()
 
 
+def test_amneziawg_parses_peer_response():
+    """dvpnx 9.x node: addrs + metadata with port, public_key and the full
+    obfuscation set (S1-S4 uint16, H1-H4 uint32, I1-I5 optional strings)."""
+    from bluecli.vpn import HandshakeResult
+    from bluecli.vpn import amneziawg as awg_mod
+
+    handshake = HandshakeResult(
+        node_addrs=["203.0.113.7:9933"],
+        peer_data={
+            "addrs": ["10.7.0.5/32", "fd00::5/128"],
+            "metadata": [{
+                "port": 443,
+                "public_key": "U" + "z" * 43,
+                "s1": 13, "s2": 64, "s3": 4, "s4": 8,
+                "h1": 28, "h2": 76, "h3": 24, "h4": 30,
+                "i1": "<b 0x1f00>", "i2": "<b 0x0005>",
+            }],
+        },
+    )
+    peer = awg_mod._peer_from_response(handshake)
+    assert peer.ipv4 == "10.7.0.5/32", peer.ipv4
+    assert peer.ipv6 == "fd00::5/128", peer.ipv6
+    assert peer.host == "203.0.113.7"
+    assert peer.endpoint == "203.0.113.7:443"
+    assert peer.public_key == "U" + "z" * 43
+    assert peer.obfs["s1"] == 13 and peer.obfs["h4"] == 30
+    assert peer.obfs["i1"] == "<b 0x1f00>"
+    assert "i3" not in peer.obfs  # optional keys absent -> omitted
+
+
+def test_amneziawg_rejects_bad_obfs_metadata():
+    """Missing or out-of-spec obfuscation params must fail loudly at parse
+    time, before we hand garbage to the engine."""
+    from bluecli.vpn import HandshakeResult, VpnError
+    from bluecli.vpn import amneziawg as awg_mod
+
+    def make(metadata):
+        return HandshakeResult(
+            node_addrs=["203.0.113.7:9933"],
+            peer_data={"addrs": ["10.7.0.5/32"], "metadata": [metadata]},
+        )
+
+    good = {"port": 443, "public_key": "U" + "z" * 43,
+            "s1": 13, "s2": 64, "s3": 4, "s4": 8,
+            "h1": 28, "h2": 76, "h3": 24, "h4": 30}
+
+    for bad in (
+        {**good, "s1": "12"},          # string instead of int
+        {**good, "s1": 65},            # S1 > 64
+        {**good, "s4": 33},            # S4 > 32
+        {**good, "h1": 4},             # H must be > 4
+        {**good, "s1": 12, "s2": 68},  # S1+56 == S2 is invalid
+    ):
+        try:
+            awg_mod._peer_from_response(make(bad))
+        except VpnError:
+            pass
+        else:
+            raise AssertionError(f"metadata {bad} should have been rejected")
+
+
+def test_amneziawg_config_full_and_setconf_variants():
+    """Two conf flavors:
+    - the FULL conf (fed to the Windows client) MUST contain
+      Address/DNS/MTU — the client applies them to the TUN;
+    - the SETCONF variant (Linux `awg setconf`) MUST NOT contain them,
+      because awg errors with "Line unrecognized" on those keys.
+    Both must carry the obfuscation keys the node sent."""
+    import configparser
+
+    from bluecli.vpn import amneziawg as awg_mod
+
+    peer = awg_mod._Peer(
+        ipv4="10.7.0.5/32",
+        ipv6="",
+        host="203.0.113.7",
+        endpoint="203.0.113.7:443",
+        public_key="A" * 44,
+        obfs={"s1": 13, "s2": 64, "s3": 4, "s4": 8,
+              "h1": 28, "h2": 76, "h3": 24, "h4": 30,
+              "i1": "<b 0x1f00>"},
+    )
+    full = _TMP / "awg-test.conf"
+    awg_mod._write_config(
+        str(full), our_privkey="B" * 44, peer=peer,
+        junk={"jc": 5, "jmin": 100, "jmax": 300}, listen_port=54321,
+    )
+    cp = configparser.RawConfigParser()
+    cp.read(str(full))
+    iface = cp["Interface"]
+    assert iface["PrivateKey"] == "B" * 44
+    assert iface["Jc"] == "5"
+    assert iface["S1"] == "13"
+    assert iface["H4"] == "30"
+    assert iface["I1"] == "<b 0x1f00>"
+    assert iface["MTU"] == "1420"
+    assert iface["Address"] == "10.7.0.5/32"
+    if sys.platform != "linux":
+        assert "dns" in iface, "Windows client needs the DNS line"
+    assert cp["Peer"]["Endpoint"] == "203.0.113.7:443"
+    assert cp["Peer"]["AllowedIPs"] == "0.0.0.0/0, ::/0"
+
+    stripped = _TMP / "awg-test.setconf.conf"
+    awg_mod._write_setconf_conf(str(full), str(stripped))
+    cp2 = configparser.RawConfigParser()
+    cp2.read(str(stripped))
+    iface2_keys = set(cp2["Interface"].keys())
+    assert not {"address", "dns", "mtu"} & iface2_keys, iface2_keys
+    accepted_iface = {"privatekey", "listenport", "jc", "jmin", "jmax",
+                      "s1", "s2", "s3", "s4", "h1", "h2", "h3", "h4",
+                      "i1", "i2", "i3", "i4", "i5"}
+    assert iface2_keys <= accepted_iface, iface2_keys - accepted_iface
+    assert cp2["Interface"]["PrivateKey"] == "B" * 44
+    assert cp2["Interface"]["S1"] == "13"
+    assert cp2["Interface"]["I1"] == "<b 0x1f00>"
+    assert cp2["Peer"]["Endpoint"] == "203.0.113.7:443"
+    full.unlink()
+    stripped.unlink()
+
+
+def test_amneziawg_junk_params_in_range():
+    """Jc 0-10, Jmin/Jmax 64-1024 and Jmin < Jmax, always."""
+    from bluecli.vpn import amneziawg as awg_mod
+
+    for _ in range(200):
+        junk = awg_mod._generate_junk()
+        assert 0 <= junk["jc"] <= 10, junk
+        assert 64 <= junk["jmin"] < junk["jmax"] <= 1024, junk
+
+
+def test_amneziawg_credentials_state_roundtrip():
+    """AWGCredentials must survive a save/load through plain dicts so that
+    reconnect after an app restart still finds the cached handshake."""
+    from bluecli.vpn.amneziawg import AWGCredentials
+
+    creds = AWGCredentials(
+        keypair_privkey_b64="cHJpdg==",
+        keypair_pubkey_b64="cHViYWJj",
+        handshake_node_addrs=["1.2.3.4:9933"],
+        handshake_peer_data={"addrs": ["10.7.0.5/32"],
+                             "metadata": [{"port": 443}]},
+    )
+    state = creds.to_state()
+    rebuilt = AWGCredentials.from_state(state)
+    assert rebuilt.keypair_privkey_b64 == "cHJpdg=="
+    assert rebuilt.keypair_pubkey_b64 == "cHViYWJj"
+    assert rebuilt.handshake_node_addrs == ["1.2.3.4:9933"]
+    assert rebuilt.handshake_peer_data == {"addrs": ["10.7.0.5/32"],
+                                           "metadata": [{"port": 443}]}
+    # Marker key must be the awg_* family — the wg/v2 markers would clash
+    # with a previous connection of another protocol.
+    assert "awg_privkey_b64" in state
+    assert "wg_privkey_b64" not in state
+    assert "v2_uuid_hex" not in state
+
+
+def test_amneziawg_require_rejects_non_executable():
+    """POSIX: a bundled binary that exists but lost its execute bit (zips
+    made on Windows drop POSIX modes) must produce a clear, actionable
+    error — 'chmod +x <path>' — instead of surfacing later as a cryptic
+    'command not found' from sudo. Field incident, 2026-08."""
+    import os as _os
+
+    from bluecli.vpn import VpnError
+    from bluecli.vpn import amneziawg as awg_mod
+
+    if _os.name != "posix":
+        return  # execute bits don't exist on Windows
+
+    p = _TMP / "fake-awg-binary"
+    p.write_bytes(b"\x7fELF")
+    _os.chmod(p, 0o644)  # present but NOT executable
+    try:
+        awg_mod._require(p, "fake")
+    except VpnError as e:
+        assert "not executable" in str(e) and "chmod +x" in str(e), e
+    else:
+        raise AssertionError("non-executable binary should have been rejected")
+    finally:
+        p.unlink()
+    # And the executable case still passes:
+    p.write_bytes(b"\x7fELF")
+    _os.chmod(p, 0o755)
+    awg_mod._require(p, "fake")  # must not raise
+    p.unlink()
+
+
+def test_amneziawg_wait_until_ready_surfaces_probe_error():
+    """When the readiness probe itself fails (e.g. non-executable `awg`),
+    the timeout error must include the probe's stderr — otherwise it
+    misleadingly blames the engine and its harmless startup banner.
+    Field incident, 2026-08."""
+    import bluecli.vpn.amneziawg as awg_mod
+    from bluecli.vpn import VpnError
+
+    class _FailingProbe:
+        returncode = 1
+        stdout = ""
+        stderr = "sudo: /x/bin/amneziawg/awg: command not found"
+
+    orig_awg = awg_mod._awg
+    orig_tail = awg_mod._read_log_tail
+    awg_mod._awg = lambda *a, **k: _FailingProbe()
+    awg_mod._read_log_tail = lambda *a, **k: "┌ banner ┐"
+    try:
+        try:
+            awg_mod._wait_until_ready(awg_mod.Path("/x/awg"), timeout=0.1)
+        except VpnError as e:
+            msg = str(e)
+            assert "command not found" in msg, msg   # the probe's own error
+            assert "banner" in msg, msg              # engine log still shown
+        else:
+            raise AssertionError("timeout should have raised VpnError")
+    finally:
+        awg_mod._awg = orig_awg
+        awg_mod._read_log_tail = orig_tail
+
+
 def test_v2ray_parses_v8_response():
     """String-form metadata still works (older nodes)."""
     from bluecli.vpn import HandshakeResult
@@ -1416,6 +1634,7 @@ def test_strip_runtime_state_preserves_session_creds():
         "tun2socks_pid": 12346,
         "socks_port": 1080,
         "tun_iface": "blue-tun",
+        "tun_local_ip": "10.7.0.5",
         "node_ip": "1.2.3.4",
         "orig_gw": "192.168.1.1",
         # Session/creds — must survive
@@ -1433,7 +1652,7 @@ def test_strip_runtime_state_preserves_session_creds():
     # Removed
     for k in ("backend", "interface", "config_path", "pid",
               "tun2socks_pid", "socks_port",
-              "tun_iface", "node_ip", "orig_gw"):
+              "tun_iface", "tun_local_ip", "node_ip", "orig_gw"):
         assert k not in after, f"runtime key {k!r} should have been stripped, got {after}"
     # Preserved
     assert after["session_id"] == 42897957
@@ -1934,6 +2153,58 @@ def test_wireguard_install_retries_once_on_failure():
     assert len(installs) == 2, (
         f"expected 2 install attempts (1 fail + 1 retry), got {len(installs)}: {installs}"
     )
+
+
+def test_amneziawg_windows_service_retries_once_on_failure():
+    """Same Service Control Manager race as WireGuard: the first
+    /installtunnelservice right after /uninstalltunnelservice often fails,
+    so _bring_up_windows must retry once before surfacing the error.
+    (This is the ONLY Windows path: amneziawg.exe service client.)"""
+    import bluecli.vpn.amneziawg as awg_mod
+
+    if sys.platform != "win32":
+        orig_platform = awg_mod.sys.platform
+        awg_mod.sys.platform = "win32"
+    else:
+        orig_platform = None
+
+    calls: list[list[str]] = []
+
+    class _Result:
+        def __init__(self, rc): self.returncode = rc; self.stdout = ""; self.stderr = ""
+
+    # First install fails (returncode 1), second succeeds (returncode 0).
+    install_results = iter([_Result(1), _Result(0)])
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if "/installtunnelservice" in cmd:
+            return next(install_results)
+        return _Result(0)  # uninstall, anything else
+
+    orig_run = awg_mod.subprocess.run
+    orig_sleep = awg_mod.time.sleep
+    orig_isfile = type(awg_mod.bin_path("amneziawg", "amneziawg")).is_file
+    awg_mod.subprocess.run = fake_run
+    awg_mod.time.sleep = lambda _: None  # don't actually wait
+    type(awg_mod.bin_path("amneziawg", "amneziawg")).is_file = lambda self: True
+    try:
+        awg_mod._bring_up_windows("/tmp/awg.conf")
+    finally:
+        awg_mod.subprocess.run = orig_run
+        awg_mod.time.sleep = orig_sleep
+        type(awg_mod.bin_path("amneziawg", "amneziawg")).is_file = orig_isfile
+        if orig_platform is not None:
+            awg_mod.sys.platform = orig_platform
+
+    installs = [c for c in calls if "/installtunnelservice" in c]
+    assert len(installs) == 2, (
+        f"expected 2 install attempts (1 fail + 1 retry), got {len(installs)}: {installs}"
+    )
+    # The uninstall before install must target our fixed interface name,
+    # matching what disconnect will later uninstall.
+    assert any(c[1] == "/uninstalltunnelservice" and c[2] == "awg-blue"
+               for c in calls), f"expected uninstall of awg-blue, got {calls}"
 
 
 def test_keccak_shim_matches_canonical_vector():
@@ -3113,6 +3384,14 @@ def main() -> int:
         ("state.round_trip", test_state_round_trip),
         ("vpn.wireguard.v8_response_parser", test_wireguard_parses_v8_response),
         ("vpn.wireguard.config_file", test_wireguard_config_file_is_valid_ini),
+        ("vpn.amneziawg.v8_response_parser", test_amneziawg_parses_peer_response),
+        ("vpn.amneziawg.bad_obfs_rejected", test_amneziawg_rejects_bad_obfs_metadata),
+        ("vpn.amneziawg.config_full_and_setconf", test_amneziawg_config_full_and_setconf_variants),
+        ("vpn.amneziawg.junk_ranges", test_amneziawg_junk_params_in_range),
+        ("vpn.amneziawg.creds_roundtrip", test_amneziawg_credentials_state_roundtrip),
+        ("vpn.amneziawg.windows_service_retry", test_amneziawg_windows_service_retries_once_on_failure),
+        ("vpn.amneziawg.require_exec_bit", test_amneziawg_require_rejects_non_executable),
+        ("vpn.amneziawg.probe_error_surfaced", test_amneziawg_wait_until_ready_surfaces_probe_error),
         ("vpn.v2ray.v8_response_parser", test_v2ray_parses_v8_response),
         ("vpn.v2ray.int_enum_decoding", test_v2ray_parses_int_enum_metadata),
         ("vpn.v2ray.digit_string_enum", test_v2ray_parses_digit_string_enum),

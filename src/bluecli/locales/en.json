@@ -67,6 +67,7 @@
   "connect.fetching_creds": "Fetching credentials from the node...",
   "connect.bringing_up_wg": "Bringing up the WireGuard tunnel (this can take a few seconds)...",
   "connect.bringing_up_v2ray": "Starting V2Ray local SOCKS5 proxy (this can take a few seconds)...",
+  "connect.bringing_up_amneziawg": "Starting the AmneziaWG tunnel (this can take a few seconds)...",
   "connect.success": "Connected to {0}.",
   "connect.failed": "Connection failed: {0}",
   "connect.wallet_not_funded": "Your wallet has no P2P yet. Send some P2P to {0} to activate it on chain, then try again.",

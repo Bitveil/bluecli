@@ -28,6 +28,7 @@ from .config import load_config
 
 NODE_TYPE_WIREGUARD = 1
 NODE_TYPE_V2RAY = 2
+NODE_TYPE_AMNEZIAWG = 3
 
 
 @dataclass
@@ -43,7 +44,7 @@ class NodeInfo:
     moniker: str
     country: str
     remote_url: str
-    node_type: int  # 1 = wireguard, 2 = v2ray
+    node_type: int  # 1 = wireguard, 2 = v2ray, 3 = amneziawg
     gigabyte_prices: list[dict]
     hourly_prices: list[dict]
     # Transports the node itself declares on its public info endpoint
@@ -54,7 +55,11 @@ class NodeInfo:
 
     @property
     def type_name(self) -> str:
-        return {NODE_TYPE_WIREGUARD: "wireguard", NODE_TYPE_V2RAY: "v2ray"}.get(
+        return {
+            NODE_TYPE_WIREGUARD: "wireguard",
+            NODE_TYPE_V2RAY: "v2ray",
+            NODE_TYPE_AMNEZIAWG: "amneziawg",
+        }.get(
             self.node_type, "unknown"
         )
 
@@ -527,7 +532,11 @@ def _build_node_info(node: Any, info: dict) -> Optional[NodeInfo]:
     )
 
 
-_SERVICE_TYPE_TO_INT = {"wireguard": NODE_TYPE_WIREGUARD, "v2ray": NODE_TYPE_V2RAY}
+_SERVICE_TYPE_TO_INT = {
+    "wireguard": NODE_TYPE_WIREGUARD,
+    "v2ray": NODE_TYPE_V2RAY,
+    "amneziawg": NODE_TYPE_AMNEZIAWG,
+}
 
 # dvpnx >= 9.0.0 serialises v2ray transport enums as their Go byte values
 # (encoding/json has no custom marshaller for them). Order mirrors the

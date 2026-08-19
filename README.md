@@ -5,9 +5,9 @@ A minimal, self-contained command-line client for the [Sentinel](https://sentine
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.10--3.14-blue.svg)
 ![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows-blue.svg)
-![Release](https://img.shields.io/badge/release-v1.0.0-blue.svg)
+![Release](https://img.shields.io/badge/release-v1.3.0-blue.svg)
 
-Create or import a Cosmos/Sentinel wallet, browse active dVPN nodes, and route your traffic through **WireGuard** or **V2Ray** — both as a seamless full tunnel. BlueCLI is built for the Sentinel community: no accounts, no telemetry, no background services.
+Create or import a Cosmos/Sentinel wallet, browse active dVPN nodes, and route your traffic through **WireGuard**, **AmneziaWG**, or **V2Ray** — all as a seamless full tunnel. BlueCLI is built for the Sentinel community: no accounts, no telemetry, no background services.
 
 > **BlueCLI does not install itself.** No registry keys, no system services, no `PATH` changes, no `~/.bluecli/` directory. Everything — including the Python virtual environment it builds on first run — lives inside the folder you unpacked. To remove BlueCLI, delete that folder.
 
@@ -34,10 +34,10 @@ Create or import a Cosmos/Sentinel wallet, browse active dVPN nodes, and route y
 
 ## Features
 
-- **Two protocols, both full-tunnel.** Connect through WireGuard or V2Ray; once connected, all traffic egresses through the node.
+- **Three protocols, all full-tunnel.** Connect through WireGuard, AmneziaWG, or V2Ray; once connected, all traffic egresses through the node.
 - **Multi-hop.** Chain two V2Ray nodes (entry → exit) so no single node sees both who you are and what you reach.
 - **Real wallet, on-chain sessions.** Create or import a 24-word Sentinel wallet, pay per gigabyte or per hour, and manage your active sessions from the CLI.
-- **Self-contained.** Bundles the WireGuard tools, V2Ray, and tun2socks. The only thing it needs from your system is Python.
+- **Self-contained.** Bundles the WireGuard and AmneziaWG tools, V2Ray, and tun2socks. The only thing it needs from your system is Python.
 - **No installation, no residue.** Runs entirely from its own folder; uninstalling is deleting it.
 - **Background node refresh.** The active-node list is fetched and kept fresh in the background so browsing is instant.
 - **Resilient routing.** The chain RPC endpoint is reached outside the tunnel, so connecting, disconnecting, and switching nodes don't cut off the client from the chain.
@@ -137,6 +137,7 @@ data/
 ├── nodes_cache.json   background-refreshed node list
 ├── state.json         present only while connected
 ├── wg-blue.conf       present only while connected (WireGuard)
+├── awg-blue.conf      present only while connected (AmneziaWG)
 └── v2ray.json         present only while connected (V2Ray)
 venv/                  the local Python virtual environment
 ```
@@ -190,7 +191,7 @@ This produces **both** archives (Linux `.tar.gz` and Windows `.zip`) plus their 
 
 ## How it works
 
-- **Routing.** A full tunnel is installed by overlaying a `0.0.0.0/1` + `128.0.0.0/1` default through the tunnel device (WireGuard via `wg-quick`; V2Ray via tun2socks). The original default route is preserved so teardown is clean.
+- **Routing.** A full tunnel is installed by overlaying a `0.0.0.0/1` + `128.0.0.0/1` default through the tunnel device (WireGuard via `wg-quick`; AmneziaWG via the `amneziawg-go` userspace engine; V2Ray via tun2socks). The original default route is preserved so teardown is clean.
 - **Chain bypass.** A host route pins the Sentinel gRPC endpoint to the real network, so chain queries keep working regardless of tunnel state — connecting or disconnecting never strands the client from the chain.
 - **Multi-hop.** A single V2Ray process is configured with two outbounds (entry → exit), chaining TCP-capable nodes so neither endpoint sees both sides of the connection.
 
@@ -201,7 +202,7 @@ This produces **both** archives (Linux `.tar.gz` and Windows `.zip`) plus their 
 - **“python3 is not installed or not on PATH.”** Install Python 3.10–3.14 and make sure it's on `PATH` (on Windows, re-run the installer and tick *Add Python to PATH*).
 - **First run is slow.** That's the one-time venv build (~30s). Later launches are instant.
 - **The connection comes up but there's no internet.** Press `d` to disconnect and reconnect, or pick another node. A node can drop or a session can expire; BlueCLI restores your normal network on disconnect.
-- **Windows SmartScreen / antivirus prompts.** The bundled WireGuard, V2Ray, and tun2socks binaries are unsigned upstream releases; allow them if your policy permits.
+- **Windows SmartScreen / antivirus prompts.** The bundled WireGuard, AmneziaWG, V2Ray, and tun2socks binaries are unsigned upstream releases; allow them if your policy permits.
 - **A paid session that never connected.** It's saved as an *orphan*; from **My active sessions** you can retry (`<num>r`) or release it (`<num>e`).
 
 ---
@@ -226,3 +227,4 @@ BlueCLI stands on:
 - [v2fly/v2ray-core](https://github.com/v2fly/v2ray-core)
 - [xjasonlyu/tun2socks](https://github.com/xjasonlyu/tun2socks)
 - [WireGuard](https://www.wireguard.com/) and [wintun](https://www.wintun.net/)
+- [AmneziaWG](https://github.com/amnezia-vpn/amneziawg) (userspace engine: [amneziawg-go](https://github.com/amnezia-vpn/amneziawg-go))

@@ -1,33 +1,33 @@
-# BlueCLI v1.2.0
+# BlueCLI v1.3.0
 
-A minimal, self-contained command-line client for the [Sentinel](https://sentinel.co) decentralised VPN network: create or import a wallet, browse dVPN nodes, and route your traffic through **WireGuard** or **V2Ray** as a full tunnel — with multi-hop and on-chain session management.
+A minimal, self-contained command-line client for the [Sentinel](https://sentinel.co) decentralised VPN network: create or import a wallet, browse active dVPN nodes, and route your traffic through **WireGuard**, **AmneziaWG**, or **V2Ray** — all as a seamless full tunnel, with multi-hop and on-chain session management.
 
 ## What's new in this release
 
-- **Native multihop eligibility on dvpnx 9.0.0+ nodes.** Nodes on the new node software declare their V2Ray transports publicly, and BlueCLI now picks that up automatically while refreshing the node list — before any paid handshake. Result: up-to-date nodes are multihop candidates immediately, even if you've never connected to them.
-- **Older nodes keep working.** For nodes still on pre-9.0.0 software, eligibility works exactly as before: connect to them once and BlueCLI learns what they offer. The two sources combine, so the candidate pool only ever grows.
+- **AmneziaWG support.** Connect to AmneziaWG nodes — WireGuard with DPI-resistant obfuscation — with the same click-and-run experience as the other protocols. Everything needed is bundled: on Windows the official AmneziaWG client runs the tunnel as a service; on Linux the `amneziawg-go` userspace engine is used (no kernel module, no driver install). AmneziaWG nodes now appear in the node browser alongside WireGuard and V2Ray ones; sessions, reconnect after restart, and clean teardown work identically.
+- **Clearer Linux diagnostics.** If a bundled binary has lost its execute bit (it can happen when the folder is transferred as a zip made on Windows), BlueCLI now tells you exactly which file and the one-line fix, instead of a cryptic "command not found".
 
 ## Highlights
 
-- WireGuard and V2Ray connections, both full-tunnel
+- WireGuard, AmneziaWG, and V2Ray connections, all full-tunnel
 - Multi-hop V2Ray chaining (entry → exit)
 - Wallet create/import (AES-GCM encrypted) with pay-per-gigabyte or per-hour sessions
 - Session browsing, retry, and teardown; automatic cleanup of expired sessions
-- Self-contained: bundled WireGuard / V2Ray / tun2socks — the only system requirement is **Python 3.10–3.14**
+- Self-contained: bundled WireGuard / AmneziaWG / V2Ray / tun2socks — the only system requirement is **Python 3.10–3.14**
 - No installation, no services, no telemetry; everything lives in the unpacked folder
 
 ## Download
 
 | Platform | File |
 |---|---|
-| Linux x86-64 | `bluecli-1.2.0-linux-x64.tar.gz` |
-| Windows x64 | `bluecli-1.2.0-windows-x64.zip` |
+| Linux x86-64 | `bluecli-1.3.0-linux-x64.tar.gz` |
+| Windows x64 | `bluecli-1.3.0-windows-x64.zip` |
 
 ## Install
 
 **Linux**
 ```bash
-tar xzf bluecli-1.2.0-linux-x64.tar.gz
+tar xzf bluecli-1.3.0-linux-x64.tar.gz
 cd bluecli-linux-x64
 ./bluecli.sh
 ```
@@ -41,7 +41,7 @@ The first launch builds a local Python virtual environment inside the folder (~3
 Each archive ships with a matching `.sha256` sidecar; verify before running:
 
 ```bash
-sha256sum -c bluecli-1.2.0-linux-x64.tar.gz.sha256
+sha256sum -c bluecli-1.3.0-linux-x64.tar.gz.sha256
 ```
 
 ## Notes

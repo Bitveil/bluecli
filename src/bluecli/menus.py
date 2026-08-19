@@ -21,13 +21,14 @@ from . import ui, wallet
 from .chain import (
     ChainClient,
     ChainError,
+    NODE_TYPE_AMNEZIAWG,
     NODE_TYPE_V2RAY,
     NODE_TYPE_WIREGUARD,
     NodeInfo,
     WalletNotOnChainError,
 )
 from .i18n import t
-from .vpn import NodeHandshakeError, VpnError, v2ray, wireguard
+from .vpn import NodeHandshakeError, VpnError, amneziawg, v2ray, wireguard
 
 SATOSHI = 1_000_000  # 1 P2P = 1_000_000 udvpn (base denom stays "udvpn")
 TICKER = "P2P"       # display symbol for the token (was "DVPN" before the rebrand)
@@ -355,7 +356,7 @@ def _browseable(nodes: list) -> list:
     initial load and the manual refresh so both present an identical list."""
     out = [
         n for n in nodes
-        if n.node_type in (NODE_TYPE_WIREGUARD, NODE_TYPE_V2RAY) and n.remote_url
+        if n.node_type in (NODE_TYPE_WIREGUARD, NODE_TYPE_V2RAY, NODE_TYPE_AMNEZIAWG) and n.remote_url
     ]
     out.sort(key=lambda n: (n.country, n.moniker))
     return out
@@ -528,7 +529,7 @@ def _bring_up_tunnel(
         )
         ui.info(t("connect.bringing_up_wg"))
         runtime = wireguard.bring_up(creds).to_state()
-    else:
+    elif node.node_type == NODE_TYPE_V2RAY:
         creds = _get_or_fetch_creds(
             state, same_session, node, session_id, priv,
             cls=v2ray.V2Credentials, marker_key="v2_uuid_hex",
@@ -539,6 +540,14 @@ def _bring_up_tunnel(
         transport_cache.record(node.address, v2ray.offered_transports(creds.handshake_peer_data))
         ui.info(t("connect.bringing_up_v2ray"))
         runtime = v2ray.bring_up(creds, remote_url=node.remote_url).to_state()
+    else:  # NODE_TYPE_AMNEZIAWG — userspace engine + awg tool + own routing
+        creds = _get_or_fetch_creds(
+            state, same_session, node, session_id, priv,
+            cls=amneziawg.AWGCredentials, marker_key="awg_privkey_b64",
+            fetch=amneziawg.fetch_creds,
+        )
+        ui.info(t("connect.bringing_up_amneziawg"))
+        runtime = amneziawg.bring_up(creds).to_state()
 
     # Bring-up succeeded → mark not-orphan and save the runtime fields.
     state = cfg.load_state()  # re-read: _get_or_fetch_* may have written
@@ -1078,6 +1087,8 @@ def _teardown_tunnel(state: dict) -> None:
         # Multihop is one v2ray process + one tun2socks, same as single-hop —
         # the teardown is identical; only the chain config differed.
         v2ray.disconnect(state)
+    elif backend == "amneziawg":
+        amneziawg.disconnect(state)
 
 
 def disconnect(unlocked: Optional[wallet.Wallet], client: Optional[ChainClient]) -> None:
