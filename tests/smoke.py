@@ -170,7 +170,8 @@ def test_derive_private_key_is_deterministic_and_32_bytes():
 def test_config_load_default():
     config.ensure_dir()
     c = config.load_config()
-    assert c["grpc_host"] == "grpc.sentinel.co"
+    assert c["grpc_host"] == "grpc-sentinel.busurnode.com"
+    assert c["grpc_port"] == 443 and c["grpc_ssl"] is True  # 443 is TLS
     assert c["denom"] == "udvpn"
     assert c["chain_id"] == "sentinelhub-2"
 
@@ -3368,6 +3369,463 @@ def test_chain_row_shows_per_hop_usage():
         "an unmetered chain must not add a usage line"
 
 
+# ---------------------------------------------------------------------------
+# 1.4.0 — Xray + Hysteria2 backends, shared SOCKS engine, tx error wrapping
+# ---------------------------------------------------------------------------
+
+_XRAY_UUID = "8d6f1c2a-3b4e-4f5a-9b8c-7d6e5f4a3b2c"
+
+
+def _hs(meta, addrs=("203.0.113.9:443",)):
+    from bluecli.vpn import HandshakeResult
+    return HandshakeResult(node_addrs=list(addrs), peer_data={"metadata": meta})
+
+
+def test_socks_require_binary():
+    """Missing → clear error; present but not executable (POSIX) → chmod hint;
+    executable → passes. Shared by the Xray and Hysteria2 backends."""
+    import os as _os
+    from bluecli.vpn import VpnError, socks_tunnel
+    p = _TMP / "fake-core"
+    p.unlink(missing_ok=True)
+    try:
+        socks_tunnel.require_binary(p, "fake")
+        raise AssertionError("missing binary must raise")
+    except VpnError as e:
+        assert "missing" in str(e), e
+    p.write_bytes(b"\x7fELF")
+    try:
+        if _os.name == "posix":
+            _os.chmod(p, 0o644)
+            try:
+                socks_tunnel.require_binary(p, "fake")
+                raise AssertionError("non-executable binary must raise")
+            except VpnError as e:
+                assert "chmod +x" in str(e), e
+            _os.chmod(p, 0o755)
+        socks_tunnel.require_binary(p, "fake")  # must not raise
+    finally:
+        p.unlink(missing_ok=True)
+
+
+def test_socks_session_state_is_runtime_only():
+    """Every key a SOCKS session persists must be a runtime key, so
+    disconnect/strip_runtime_state removes them all (and keeps creds)."""
+    from bluecli import config as cfg
+    from bluecli.vpn.socks_tunnel import SocksSession
+    st = SocksSession(backend="xray", pid=1, tun2socks_pid=2, socks_port=1080,
+                      config_path="/x", node_ip="1.2.3.4", orig_gw="10.0.0.1").to_state()
+    assert st["backend"] == "xray"
+    assert set(st) <= set(cfg._RUNTIME_STATE_KEYS), set(st) - set(cfg._RUNTIME_STATE_KEYS)
+
+
+def test_v2ray_uses_shared_socks_engine():
+    """Refactor guard: V2Ray's bring-up goes through socks_tunnel.spawn_and_route
+    with its own core/log, and v2ray.disconnect delegates to the shared teardown."""
+    from bluecli.vpn import socks_tunnel, v2ray
+    seen = {}
+    orig_sar, orig_disc = socks_tunnel.spawn_and_route, socks_tunnel.disconnect
+    socks_tunnel.spawn_and_route = lambda spawn_core, **kw: seen.update(kw) or (11, 22)
+    socks_tunnel.disconnect = lambda st: seen.__setitem__("disc", st)
+    try:
+        pids = v2ray._spawn_and_install_routing(
+            "v2", "tun", config_path="/c.json", socks_port=1080,
+            bypass_ip="1.2.3.4", original=object())
+        v2ray.disconnect({"backend": "v2ray"})
+    finally:
+        socks_tunnel.spawn_and_route, socks_tunnel.disconnect = orig_sar, orig_disc
+    assert pids == (11, 22)
+    assert seen["core_name"] == "V2Ray" and seen["core_log"] == "v2ray.log"
+    assert seen["socks_port"] == 1080 and seen["bypass_ip"] == "1.2.3.4"
+    assert seen["disc"] == {"backend": "v2ray"}
+
+
+def test_hysteria2_handshake_sends_uuid_string():
+    """The hysteria2 PeerRequest field is a Go *string* — sending the byte
+    array v2ray/xray use would fail to unmarshal on the node."""
+    import uuid as _uuid
+    from bluecli.vpn import HandshakeResult, hysteria2
+    sent = {}
+    orig = hysteria2.fetch_node_credentials
+    hysteria2.fetch_node_credentials = lambda **kw: (sent.update(kw), HandshakeResult(
+        node_addrs=["1.2.3.4:443"], peer_data={"metadata": []}))[1]
+    try:
+        creds = hysteria2.fetch_creds(remote_url="https://n", session_id=7, private_key=b"k" * 32)
+    finally:
+        hysteria2.fetch_node_credentials = orig
+    assert isinstance(sent["request_data"]["uuid"], str)
+    assert str(_uuid.UUID(sent["request_data"]["uuid"])) == sent["request_data"]["uuid"]
+    assert creds.uuid == sent["request_data"]["uuid"]  # auth credential == UUID sent
+    back = hysteria2.Hy2Credentials.from_state(creds.to_state())
+    assert back == creds
+
+
+def test_hysteria2_server_parsing_and_config():
+    """Endpoint parsing validates every field; the generated client config
+    dials by IP, keeps SNI = host, pins the cert, and enables Salamander only
+    when the node provides a password."""
+    from bluecli.vpn import VpnError, hysteria2
+    pin = "6d:ad:54:95"
+    # malformed entries are skipped, the first valid one wins (port as string ok)
+    srv = hysteria2._server_from_response(_hs([
+        "junk", {"port": 0}, {"port": "70000"}, {"port": True},
+        {"port": "4443", "tls_pin": pin, "obfs_password": "salt"},
+    ], addrs=["node.example:8080"]))
+    assert srv == {"host": "node.example", "port": 4443, "tls_pin": pin, "obfs_password": "salt"}
+    cfg = hysteria2._build_config(srv, auth=_XRAY_UUID, socks_port=1081, dial_ip="198.51.100.4")
+    assert cfg["server"] == "198.51.100.4:4443" and cfg["auth"] == _XRAY_UUID
+    assert cfg["tls"] == {"sni": "node.example", "insecure": True, "pinSHA256": pin}
+    assert cfg["obfs"] == {"type": "salamander", "salamander": {"password": "salt"}}
+    assert cfg["socks5"] == {"listen": "127.0.0.1:1081"}
+    plain = hysteria2._build_config(dict(srv, obfs_password="", tls_pin=""), auth="a",
+                                    socks_port=1, dial_ip="1.1.1.1")
+    assert "obfs" not in plain and "pinSHA256" not in plain["tls"]
+    for bad in (_hs([]), _hs([{"port": "x"}]), _hs([{"port": 1}], addrs=[])):
+        try:
+            hysteria2._server_from_response(bad)
+            raise AssertionError("must raise")
+        except VpnError:
+            pass
+
+
+def test_xray_handshake_and_creds():
+    """Xray's PeerRequest uses uuid.UUID like v2ray → the byte-array form."""
+    from bluecli.vpn import HandshakeResult, xray
+    sent = {}
+    orig = xray.fetch_node_credentials
+    xray.fetch_node_credentials = lambda **kw: (sent.update(kw), HandshakeResult(
+        node_addrs=["1.2.3.4:443"], peer_data={"metadata": [{"port": "1"}]}))[1]
+    try:
+        creds = xray.fetch_creds(remote_url="https://n", session_id=7, private_key=b"k" * 32)
+    finally:
+        xray.fetch_node_credentials = orig
+    raw = sent["request_data"]["uuid"]
+    assert isinstance(raw, list) and len(raw) == 16 and bytes(raw).hex() == creds.uuid_hex
+    assert xray.XrayCredentials.from_state(creds.to_state()) == creds
+
+
+def test_xray_endpoint_validation_and_ranking():
+    """Unusable entries are skipped (TLS without pin — Xray v26 has no
+    allowInsecure; Reality without key/SNI; SS-2022 without method/key;
+    unknown enums); among usable ones Reality > TLS > none, then transport."""
+    from bluecli.vpn import VpnError, xray
+    pin = "ab" * 32
+    reality = {"port": "8443", "proxy_protocol": 1, "transport_protocol": 1,
+               "transport_security": 3, "flow": 2, "reality_public_key": "PUB",
+               "reality_server_name": "cover.example", "reality_short_id": "01ab",
+               "reality_fingerprint": ""}
+    unusable = [
+        {"port": "1", "proxy_protocol": 1, "transport_protocol": 1, "transport_security": 2},      # tls, no pin
+        dict(reality, port="2", reality_public_key=""),                                          # reality, no key
+        {"port": "3", "proxy_protocol": 4, "transport_protocol": 1, "transport_security": 1},      # ss2022, no key
+        {"port": "4", "proxy_protocol": 9, "transport_protocol": 1, "transport_security": 1},      # unknown proxy
+        {"port": "5", "proxy_protocol": 1, "transport_protocol": 7, "transport_security": 1},      # v2ray "tcp"=7 is NOT xray
+    ]
+    for e in unusable:
+        assert xray._parse_endpoint(e, "h") is None, e
+    try:
+        xray._server_from_response(_hs(unusable))
+        raise AssertionError("no usable endpoint must raise")
+    except VpnError:
+        pass
+    tls_ws = {"port": "443", "proxy_protocol": 2, "transport_protocol": 2,
+              "transport_security": 2, "tls_pin": pin}
+    none_tcp = {"port": "80", "proxy_protocol": 1, "transport_protocol": 1, "transport_security": 1}
+    best = xray._server_from_response(_hs(unusable + [none_tcp, tls_ws, reality]))
+    assert best["security"] == "reality" and best["flow"] == "xtls-rprx-vision"
+    assert best["reality"]["fingerprint"] == "chrome"  # default when the node sends ""
+    best = xray._server_from_response(_hs([none_tcp, tls_ws]))
+    assert best["security"] == "tls" and best["transport"] == "websocket" and best["tls_pin"] == pin
+    # textual enums (handshake variants) are accepted too
+    assert xray._parse_endpoint({"port": 9, "proxy_protocol": "trojan", "transport_protocol": "grpc",
+                                 "transport_security": "none"}, "h")["proxy"] == "trojan"
+
+
+def test_xray_outbounds_per_protocol():
+    """Per-user secrets derive from the UUID exactly as the node does, the
+    core id for SS-2022 is 'shadowsocks', TLS is pinned (no allowInsecure)."""
+    import base64 as _b64, hashlib as _hl, json, uuid as _uuid
+    from bluecli.vpn import xray
+    uid = _uuid.UUID(_XRAY_UUID)
+    base = {"host": "node.example", "port": 443, "flow": ""}
+
+    o = xray._build_outbound(dict(base, proxy="vless", transport="tcp", security="tls",
+                                  flow="xtls-rprx-vision", tls_pin="ab" * 32), uid=uid, dial_ip="9.9.9.9")
+    user = o["settings"]["vnext"][0]["users"][0]
+    assert o["protocol"] == "vless" and o["settings"]["vnext"][0]["address"] == "9.9.9.9"
+    assert user == {"id": _XRAY_UUID, "encryption": "none", "flow": "xtls-rprx-vision"}
+    assert o["streamSettings"]["tlsSettings"] == {
+        "serverName": "node.example", "fingerprint": "chrome", "pinnedPeerCertSha256": "ab" * 32}
+    assert "allowInsecure" not in json.dumps(o)
+
+    o = xray._build_outbound(dict(base, proxy="vmess", transport="websocket", security="none"),
+                             uid=uid, dial_ip="9.9.9.9")
+    assert o["settings"]["vnext"][0]["users"][0] == {"id": _XRAY_UUID, "alterId": 0}
+    assert o["streamSettings"] == {"network": "websocket", "security": "none"}
+
+    o = xray._build_outbound(dict(base, proxy="trojan", transport="grpc", security="none"),
+                             uid=uid, dial_ip="9.9.9.9")
+    assert o["settings"]["servers"][0]["password"] == _XRAY_UUID
+
+    o = xray._build_outbound(dict(base, proxy="shadowsocks-2022", transport="tcp", security="none",
+                                  method="2022-blake3-aes-256-gcm", key="SRVKEY"), uid=uid, dial_ip="9.9.9.9")
+    expected_user = _b64.b64encode(_hl.sha256(uid.bytes).digest()).decode()
+    assert o["protocol"] == "shadowsocks"
+    assert o["settings"]["servers"][0] == {"address": "9.9.9.9", "port": 443,
+                                           "method": "2022-blake3-aes-256-gcm",
+                                           "password": f"SRVKEY:{expected_user}"}
+
+    o = xray._build_outbound(dict(base, proxy="vless", transport="tcp", security="reality",
+                                  reality={"public_key": "PUB", "server_name": "cover.example",
+                                           "short_id": "01ab", "fingerprint": "chrome"}),
+                             uid=uid, dial_ip="9.9.9.9")
+    assert o["streamSettings"]["realitySettings"] == {
+        "fingerprint": "chrome", "publicKey": "PUB", "serverName": "cover.example", "shortId": "01ab"}
+    cfg = xray._build_config(dict(base, proxy="vless", transport="tcp", security="none"),
+                             uid=uid, socks_port=1082, dial_ip="9.9.9.9")
+    assert cfg["inbounds"][0]["port"] == 1082 and cfg["inbounds"][0]["settings"]["udp"] is True
+    assert len(cfg["outbounds"]) == 1
+
+
+def test_parse_node_response_xray_hysteria2_types():
+    """The new service types are recognised; native transport metadata is
+    read ONLY for v2ray — xray numbers its enums differently (1 = tcp there,
+    1 = domainsocket in v2ray), so reading it would be wrong."""
+    from bluecli.chain import (NODE_TYPE_HYSTERIA2, NODE_TYPE_V2RAY, NODE_TYPE_XRAY,
+                               _parse_node_response)
+
+    def resp(service, meta):
+        return {"success": True, "result": {"service_type": service, "moniker": "m",
+                                            "location": {"country": "IT"},
+                                            "service_metadata": meta}}
+    x = _parse_node_response(resp("xray", [{"transport_protocol": 1}]))
+    assert x["type"] == NODE_TYPE_XRAY and x["transports"] is None, x
+    h = _parse_node_response(resp("hysteria2", [{"port": 443}]))
+    assert h["type"] == NODE_TYPE_HYSTERIA2 and h["transports"] is None, h
+    v = _parse_node_response(resp("v2ray", [{"transport_protocol": 7}]))   # regression
+    assert v["type"] == NODE_TYPE_V2RAY and v["transports"] == ["tcp"], v
+    assert _parse_node_response(resp("openvpn", [])) == {}  # still unsupported
+
+
+def test_connectable_types_cover_every_service_and_browser():
+    """Every service type the parser accepts must be connectable (and vice
+    versa), and the browser must keep xray/hysteria2 nodes."""
+    from bluecli import menus
+    from bluecli.chain import (NODE_TYPE_HYSTERIA2, NODE_TYPE_V2RAY, NODE_TYPE_XRAY,
+                               NodeInfo, _SERVICE_TYPE_TO_INT)
+    assert set(menus.CONNECTABLE_NODE_TYPES) == set(_SERVICE_TYPE_TO_INT.values())
+
+    def node(addr, t):
+        return NodeInfo(address=addr, moniker=addr, country="IT", remote_url="https://x:1",
+                        node_type=t, gigabyte_prices=[], hourly_prices=[])
+    kept = menus._browseable([node("a", NODE_TYPE_XRAY), node("b", NODE_TYPE_HYSTERIA2),
+                              node("c", NODE_TYPE_V2RAY), node("d", 99)])
+    assert [n.address for n in kept] == ["a", "b", "c"]
+    assert node("a", NODE_TYPE_XRAY).type_name == "xray"
+    assert node("b", NODE_TYPE_HYSTERIA2).type_name == "hysteria2"
+
+
+def test_bring_up_dispatches_xray_and_hysteria2():
+    """Functional dispatch: each new node type uses its own creds class,
+    marker key, fetch and bring-up — and an unknown type fails loudly
+    instead of falling into some other backend."""
+    from bluecli import config as cfg, menus, ui as _ui, wallet as _wallet
+    from bluecli.chain import NODE_TYPE_HYSTERIA2, NODE_TYPE_XRAY, NodeInfo
+    from bluecli.vpn import VpnError, hysteria2, xray
+
+    calls = []
+
+    class _Rt:
+        def __init__(self, backend):
+            self.backend = backend
+
+        def to_state(self):
+            return {"backend": self.backend}
+
+    saved = (cfg.load_state, cfg.save_state, _wallet.derive_private_key, menus._fetch_public_ip,
+             menus._get_or_fetch_creds, menus._verify_public_ip, menus._pause,
+             xray.bring_up, hysteria2.bring_up, _ui.info, _ui.success)
+    store: dict = {}
+    cfg.load_state = lambda: dict(store)
+    cfg.save_state = lambda st: store.update(st)
+    _wallet.derive_private_key = lambda m: b"k" * 32
+    menus._fetch_public_ip = lambda **k: None
+    menus._get_or_fetch_creds = lambda *a, cls, marker_key, fetch: (
+        calls.append((cls.__name__, marker_key, fetch.__module__)), "CREDS")[1]
+    menus._verify_public_ip = lambda **k: "ok"
+    menus._pause = lambda *a, **k: None
+    xray.bring_up = lambda c: (calls.append(("xray.bring_up", c)), _Rt("xray"))[1]
+    hysteria2.bring_up = lambda c: (calls.append(("hy2.bring_up", c)), _Rt("hysteria2"))[1]
+    _ui.info = _ui.success = lambda *a, **k: None
+
+    class _U:
+        mnemonic = "m"
+
+    def node(t):
+        return NodeInfo(address="sentnode1x", moniker="M", country="IT", remote_url="https://x:1",
+                        node_type=t, gigabyte_prices=[], hourly_prices=[])
+    try:
+        menus._bring_up_tunnel(_U(), None, node(NODE_TYPE_XRAY), 1)
+        assert store["backend"] == "xray"
+        menus._bring_up_tunnel(_U(), None, node(NODE_TYPE_HYSTERIA2), 2)
+        assert store["backend"] == "hysteria2"
+        try:
+            menus._bring_up_tunnel(_U(), None, node(99), 3)
+            raise AssertionError("unknown node type must raise")
+        except VpnError:
+            pass
+    finally:
+        (cfg.load_state, cfg.save_state, _wallet.derive_private_key, menus._fetch_public_ip,
+         menus._get_or_fetch_creds, menus._verify_public_ip, menus._pause,
+         xray.bring_up, hysteria2.bring_up, _ui.info, _ui.success) = saved
+    assert calls == [
+        ("XrayCredentials", "xray_uuid_hex", "bluecli.vpn.xray"), ("xray.bring_up", "CREDS"),
+        ("Hy2Credentials", "hy2_uuid", "bluecli.vpn.hysteria2"), ("hy2.bring_up", "CREDS"),
+    ], calls
+
+
+def test_teardown_and_emergency_cleanup_cover_new_backends():
+    """Both teardown paths (menu disconnect and the atexit fail-safe) must
+    reach the xray and hysteria2 backends — a missed branch would strand the
+    user with redirected routing."""
+    import bluecli.__main__ as entry
+    from bluecli import config as cfg, menus
+    from bluecli.vpn import hysteria2, xray
+    calls = []
+    saved = (xray.disconnect, hysteria2.disconnect, cfg.load_state, cfg.strip_runtime_state)
+    xray.disconnect = lambda st: calls.append("xray")
+    hysteria2.disconnect = lambda st: calls.append("hy2")
+    cfg.strip_runtime_state = lambda: calls.append("strip")
+    try:
+        menus._teardown_tunnel({"backend": "xray"})
+        menus._teardown_tunnel({"backend": "hysteria2"})
+        for b in ("xray", "hysteria2"):
+            cfg.load_state = lambda b=b: {"backend": b}
+            entry._emergency_cleanup()
+    finally:
+        (xray.disconnect, hysteria2.disconnect, cfg.load_state, cfg.strip_runtime_state) = saved
+    assert calls == ["xray", "hy2", "xray", "strip", "hy2", "strip"], calls
+
+
+def test_tx_broadcast_wraps_grpc_errors():
+    """A raw gRPC rejection while sending a tx becomes a readable ChainError
+    (callers already handle it) instead of a crash; the sequence-mismatch
+    case explains the pending tx. Non-gRPC errors pass through unchanged."""
+    import grpc as _grpc
+    from bluecli import chain
+
+    class _Rpc(_grpc.RpcError):
+        def __init__(self, details):
+            self._d = details
+
+        def details(self):
+            return self._d
+
+    def boom(err):
+        def fn():
+            raise err
+        return fn
+
+    try:
+        chain._broadcast(boom(_Rpc("account sequence mismatch, expected 525, got 524: "
+                                   "incorrect account sequence")), "t")
+        raise AssertionError("must raise ChainError")
+    except chain.ChainError as e:
+        assert "pending" in str(e) and "Nothing was charged" in str(e), e
+        assert "expects sequence 525" in str(e) and "used 524" in str(e), e
+        assert "gRPC endpoint" in str(e), e
+    try:
+        chain._broadcast(boom(_Rpc("insufficient fees")), "t")
+        raise AssertionError("must raise ChainError")
+    except chain.ChainError as e:
+        assert "insufficient fees" in str(e) and "Nothing was charged" not in str(e), e
+    try:
+        chain._broadcast(boom(KeyError("x")), "t")
+        raise AssertionError("must re-raise")
+    except KeyError:
+        pass
+    assert chain._broadcast(lambda: {"hash": "AB"}, "t") == {"hash": "AB"}
+
+
+
+
+def test_detect_grpc_tls_order_and_fallback():
+    """Port 443 is tried with TLS first, other ports plaintext first; the
+    other mode is the fallback; None when neither answers. Each attempt is
+    the real SDK connect (here faked)."""
+    from bluecli import chain
+    tried = []
+
+    def fake_sdk(answer_tls):
+        def _sdk(host, port, ssl=False):
+            tried.append(ssl)
+            if answer_tls is None or ssl is not answer_tls:
+                raise RuntimeError("no answer in this mode")
+            return object()
+        return _sdk
+
+    orig = chain.SDKInstance
+    try:
+        for port, server_tls, want, order in (
+            (443, True, True, [True]),            # TLS on 443: first try
+            (443, False, False, [True, False]),   # plaintext on 443: fallback
+            (9090, False, False, [False]),        # plaintext elsewhere: first try
+            (23990, True, True, [False, True]),   # TLS elsewhere: fallback
+            (9090, None, None, [False, True]),    # nothing answers
+        ):
+            tried.clear()
+            chain.SDKInstance = fake_sdk(server_tls)
+            assert chain.detect_grpc_tls("h", port) is want, (port, server_tls)
+            assert tried == order, (port, tried)
+    finally:
+        chain.SDKInstance = orig
+
+
+def test_parse_grpc_endpoint_variants():
+    """Endpoints are accepted the way people paste them from lists."""
+    from bluecli.menus import _parse_grpc_endpoint
+    assert _parse_grpc_endpoint("https://sentinel-grpc.publicnode.com:443/") == (
+        "sentinel-grpc.publicnode.com", 443)
+    assert _parse_grpc_endpoint("  grpc.sentinel.co:9090 ") == ("grpc.sentinel.co", 9090)
+    assert _parse_grpc_endpoint("grpc://1.2.3.4:23990") == ("1.2.3.4", 23990)
+    for bad in ("host", "host:0", "host:abc", ":443", "host:70000"):
+        try:
+            _parse_grpc_endpoint(bad)
+            raise AssertionError(f"{bad!r} must be rejected")
+        except ValueError:
+            pass
+
+
+def test_settings_grpc_probe_saves_tls_and_detects_tls_only_change():
+    """Re-entering the SAME host:port must still save the detected TLS mode
+    and report a change (so the chain client is rebuilt) — the old check
+    compared host+port only. An endpoint that answers in neither mode is
+    never saved."""
+    from bluecli import config as cfg, menus, ui as _ui
+    store = {"grpc_host": "sentinel-grpc.publicnode.com", "grpc_port": 443,
+             "grpc_ssl": False, "chain_id": "sentinelhub-2", "denom": "udvpn"}
+    saved = (cfg.load_config, cfg.save_config, menus.detect_grpc_tls, _ui.prompt,
+             _ui.info, _ui.success, _ui.error, _ui.header, menus._pause)
+    answers = []
+    cfg.load_config = lambda: dict(store)
+    cfg.save_config = lambda c: store.update(c)
+    _ui.prompt = lambda *a, **k: answers.pop(0)
+    _ui.info = _ui.success = _ui.error = _ui.header = lambda *a, **k: None
+    menus._pause = lambda *a, **k: None
+    try:
+        menus.detect_grpc_tls = lambda h, p: True
+        answers[:] = ["1", "https://sentinel-grpc.publicnode.com:443", "3"]
+        assert menus.settings_menu() is True, "TLS-only change must trigger a rebuild"
+        assert store["grpc_ssl"] is True and store["grpc_port"] == 443
+
+        menus.detect_grpc_tls = lambda h, p: None
+        answers[:] = ["1", "dead.example:9090", "3"]
+        assert menus.settings_menu() is False, "unreachable endpoint must change nothing"
+        assert store["grpc_host"] == "sentinel-grpc.publicnode.com"
+    finally:
+        (cfg.load_config, cfg.save_config, menus.detect_grpc_tls, _ui.prompt,
+         _ui.info, _ui.success, _ui.error, _ui.header, menus._pause) = saved
+
 def main() -> int:
     tests = [
         ("i18n.loads_english", test_i18n_loads_english),
@@ -3392,6 +3850,22 @@ def main() -> int:
         ("vpn.amneziawg.windows_service_retry", test_amneziawg_windows_service_retries_once_on_failure),
         ("vpn.amneziawg.require_exec_bit", test_amneziawg_require_rejects_non_executable),
         ("vpn.amneziawg.probe_error_surfaced", test_amneziawg_wait_until_ready_surfaces_probe_error),
+        ("vpn.socks.require_binary", test_socks_require_binary),
+        ("vpn.socks.session_state_runtime_only", test_socks_session_state_is_runtime_only),
+        ("vpn.v2ray.uses_shared_socks_engine", test_v2ray_uses_shared_socks_engine),
+        ("vpn.hysteria2.handshake_uuid_string", test_hysteria2_handshake_sends_uuid_string),
+        ("vpn.hysteria2.server_and_config", test_hysteria2_server_parsing_and_config),
+        ("vpn.xray.handshake_and_creds", test_xray_handshake_and_creds),
+        ("vpn.xray.endpoint_validation_ranking", test_xray_endpoint_validation_and_ranking),
+        ("vpn.xray.outbounds_per_protocol", test_xray_outbounds_per_protocol),
+        ("chain.parse_response_xray_hysteria2", test_parse_node_response_xray_hysteria2_types),
+        ("menus.connectable_types_and_browser", test_connectable_types_cover_every_service_and_browser),
+        ("menus.bring_up_dispatch_new_backends", test_bring_up_dispatches_xray_and_hysteria2),
+        ("menus.teardown_cleanup_new_backends", test_teardown_and_emergency_cleanup_cover_new_backends),
+        ("chain.tx_broadcast_wraps_grpc_errors", test_tx_broadcast_wraps_grpc_errors),
+        ("chain.detect_grpc_tls", test_detect_grpc_tls_order_and_fallback),
+        ("menus.parse_grpc_endpoint", test_parse_grpc_endpoint_variants),
+        ("menus.settings_grpc_probe_tls", test_settings_grpc_probe_saves_tls_and_detects_tls_only_change),
         ("vpn.v2ray.v8_response_parser", test_v2ray_parses_v8_response),
         ("vpn.v2ray.int_enum_decoding", test_v2ray_parses_int_enum_metadata),
         ("vpn.v2ray.digit_string_enum", test_v2ray_parses_digit_string_enum),

@@ -27,11 +27,8 @@ from __future__ import annotations
 
 import functools
 import json
-import os
 import re
-import socket
 import subprocess
-import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -39,11 +36,17 @@ from typing import Optional
 
 from ..config import V2RAY_CONF_FILE, bin_path
 from . import HandshakeResult, VpnError, fetch_node_credentials
+from . import decode_enum as _decode_enum
 from . import _routing
+from . import socks_tunnel
+from .socks_tunnel import (
+    DEFAULT_SOCKS_PORT,
+    TUN_NAME,
+    pick_free_port as _pick_free_port,
+    popen_logged as _popen_logged,
+    resolve_endpoint_ip as _resolve_endpoint_ip,
+)
 
-DEFAULT_SOCKS_PORT = 1080
-TUN_NAME = "blue-tun"  # also used by tun2socks's -device flag
-TUN_LOCAL_IP = "198.18.0.1"  # IP assigned to the TUN device on every OS
 
 
 @dataclass
@@ -208,62 +211,19 @@ def bring_up(creds: V2Credentials, remote_url: str) -> V2RayProxySession:
 def _spawn_and_install_routing(
     v2_exe, tun_exe, *, config_path: str, socks_port: int, bypass_ip: str, original
 ):
-    """Spawn v2ray + tun2socks and install split-default routing + DNS,
-    bypassing `bypass_ip` (the node we connect to directly) via a host route.
-    Rolls everything back and raises on any failure. Returns (v2_pid, tun_pid).
+    """Spawn v2ray + tun2socks and install the full-tunnel routing via the
+    shared SOCKS engine. Returns (v2_pid, tun_pid).
 
     Shared by single- and multi-hop bring-up: the only thing that differs
     between them is the config already written to `config_path` and which IP
     gets the bypass route (the single node, or the entry node of the chain).
     """
-    v2_proc = _spawn_v2ray(v2_exe, config_path)
-    time.sleep(1.5)
-    if v2_proc.poll() is not None:
-        msg = _read_log_tail("v2ray.log") or "(no output)"
-        raise VpnError(f"V2Ray exited immediately. v2ray.log tail:\n{msg}")
-
-    tun_proc: Optional[subprocess.Popen] = None
-    routing_steps: list[str] = []
-    try:
-        _routing.add_host_route(bypass_ip, original)
-        routing_steps.append("host_route")
-
-        # Keep the chain gRPC endpoint OUT of the tunnel, so querying or ending
-        # sessions — and tearing the tunnel down — never severs our path to the
-        # chain.
-        _routing.add_chain_bypass(original)
-        routing_steps.append("chain_bypass")
-
-        tun_proc = _spawn_tun2socks(tun_exe, socks_port=socks_port)
-        time.sleep(1.5)
-        if tun_proc.poll() is not None:
-            msg = _read_log_tail("tun2socks.log") or "(no output)"
-            raise VpnError(f"tun2socks exited immediately. tun2socks.log tail:\n{msg}")
-
-        # Assign the TUN device an IP — required on ALL platforms. Without
-        # this, the kernel can't route through the TUN: routes that name
-        # the gateway 198.18.0.1 would fail to install (Linux) or silently
-        # not direct traffic anywhere (Windows, where the route is added
-        # but the gateway is not on-link).
-        _routing.configure_tun(TUN_NAME, TUN_LOCAL_IP)
-        routing_steps.append("tun_up")
-
-        _routing.add_default_via_tun(TUN_NAME, TUN_LOCAL_IP)
-        routing_steps.append("split_default")
-
-        # Point DNS at a public resolver the exit node can reach. Without
-        # this, a system configured with a PRIVATE nameserver (common behind
-        # NAT) tunnels its DNS queries to the node, which can't route to that
-        # private address — every lookup hangs and the tunnel looks dead.
-        _routing.set_dns()
-        routing_steps.append("dns")
-    except Exception:
-        _rollback_routing(routing_steps, bypass_ip)
-        _kill_pid(tun_proc.pid if tun_proc else None)
-        _kill_pid(v2_proc.pid)
-        raise
-
-    return v2_proc.pid, tun_proc.pid
+    return socks_tunnel.spawn_and_route(
+        lambda: _spawn_v2ray(v2_exe, config_path),
+        core_name="V2Ray", core_log="v2ray.log",
+        tun_exe=tun_exe, socks_port=socks_port,
+        bypass_ip=bypass_ip, original=original,
+    )
 
 
 def _require_tcp_endpoints(entry_server: dict, exit_server: dict) -> None:
@@ -370,21 +330,9 @@ def bring_up_multihop(
 
 
 def disconnect(state: dict) -> None:
-    """Tear down everything connect() set up. Best-effort: every step
-    runs regardless of earlier failures, so a partially-bricked state
-    still gets unwound."""
-    tun_iface = state.get("tun_iface", TUN_NAME)
-    node_ip = state.get("node_ip")
-
-    # Routing first, so even if process kill fails the user has internet back.
-    _routing.restore_dns()
-    _routing.remove_default_via_tun(tun_iface, TUN_LOCAL_IP)
-    if node_ip:
-        _routing.remove_host_route(node_ip)
-    _routing.remove_chain_bypass()
-
-    for pid_key in ("tun2socks_pid", "pid"):
-        _kill_pid(state.get(pid_key))
+    """Tear down a V2Ray tunnel (single- or multi-hop) — the shared SOCKS
+    teardown: routing first, then tun2socks and v2ray."""
+    socks_tunnel.disconnect(state)
 
 
 # --------------------------------------------------------------------------
@@ -408,23 +356,6 @@ _TRANSPORT_PROTOCOL_ENUM = {
     8: "websocket",
 }
 _TRANSPORT_SECURITY_ENUM = {1: "none", 2: "tls"}
-
-
-def _decode_enum(raw, mapping: dict, default: str = "") -> str:
-    """Translate a metadata field that can be int (enum), digit-string,
-    or already-textual into the canonical v2ray string. Tolerates all
-    three shapes because different nodes / SDK versions emit different
-    ones."""
-    if raw is None or isinstance(raw, bool):
-        return default
-    if isinstance(raw, int):
-        return mapping.get(raw, default)
-    text = str(raw).strip().lower()
-    if not text:
-        return default
-    if text.isdigit():
-        return mapping.get(int(text), default)
-    return text
 
 
 def _score_endpoint(transport: str, proxy: str, security: str) -> int:
@@ -521,39 +452,6 @@ def _server_from_response(handshake) -> dict:
         raise VpnError("Node didn't return any usable endpoint metadata.")
     candidates.sort(key=lambda x: x[0])
     return candidates[0][1]
-
-
-def _resolve_endpoint_ip(host: str) -> str:
-    """Resolve a node's v2ray ENDPOINT host to an IPv4 literal (returns it
-    unchanged if it's already an IP).
-
-    This MUST run before the tunnel captures the default route. v2ray dials
-    the node by this IP, so it never needs DNS at connect time. Otherwise, for
-    a node that advertises a hostname (e.g. 'brazil.dvpn-x.com') instead of an
-    IP, v2ray resolves the name only once the connect is under way — by which
-    point the default route is already redirected into the TUN, and the lookup
-    is trapped inside the very tunnel it's trying to build:
-        resolve node -> DNS query -> default route -> TUN -> tun2socks
-            -> v2ray SOCKS -> dial node -> resolve node ...
-    a circular dependency that hangs every such connect ('lookup ...:
-    operation was canceled' in v2ray.log). Resolving up-front breaks the loop.
-    """
-    try:
-        return socket.gethostbyname(host)
-    except socket.gaierror as e:
-        raise VpnError(f"Could not resolve node endpoint {host!r}: {e}") from e
-
-
-def _pick_free_port(preferred: int = 0) -> int:
-    """Try `preferred` first, fall back to a kernel-assigned port."""
-    for port in ((preferred, 0) if preferred else (0,)):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            try:
-                s.bind(("127.0.0.1", port))
-                return s.getsockname()[1]
-            except OSError:
-                continue
-    raise VpnError("Could not find a free local port for the SOCKS5 proxy.")
 
 
 def _build_outbound(
@@ -724,37 +622,6 @@ def _detect_v2ray_major(exe: Path) -> int:
     return 5  # safest default if detection completely fails
 
 
-# Windows: keep our spawned helpers detached from the parent console so
-# Ctrl-C doesn't take them down before the routing rollback can run.
-_DETACHED_FLAGS = 0x00000200 | 0x00000008 if os.name == "nt" else 0
-
-
-def _popen_logged(
-    args: list[str], log_name: str, *, cwd: str
-) -> subprocess.Popen:
-    """Spawn a child process and tee its combined output to data/<log_name>.
-
-    Both v2ray and tun2socks survive in the background past Python's
-    lifetime; we use the same launch shape for both so a missing exit
-    code or a wedged write to either log gets diagnosed the same way.
-    """
-    log_file = open(V2RAY_CONF_FILE.parent / log_name, "wb")
-    try:
-        return subprocess.Popen(
-            args,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL,
-            creationflags=_DETACHED_FLAGS,
-            start_new_session=(os.name != "nt"),
-            cwd=cwd,
-        )
-    finally:
-        # The child inherited its own dup of the fd; the parent's copy would
-        # otherwise leak (2 per connect) for the life of the CLI.
-        log_file.close()
-
-
 def _spawn_v2ray(exe: Path, config_path: str) -> subprocess.Popen:
     """Spawn v2ray with the right CLI for its major version.
 
@@ -766,71 +633,3 @@ def _spawn_v2ray(exe: Path, config_path: str) -> subprocess.Popen:
     major = _detect_v2ray_major(exe)
     args = [str(exe), "run", "-c", config_path] if major >= 5 else [str(exe), "-c", config_path]
     return _popen_logged(args, "v2ray.log", cwd=str(V2RAY_CONF_FILE.parent))
-
-
-def _spawn_tun2socks(exe: Path, *, socks_port: int) -> subprocess.Popen:
-    """xjasonlyu/tun2socks: -device tun://NAME -proxy socks5://127.0.0.1:port
-
-    We deliberately don't pass `-interface` even though tun2socks accepts
-    it. Its semantics are "bind the upstream socket to a named interface",
-    and getting the name right is platform-dependent. Since our upstream
-    is 127.0.0.1 the loopback route always wins anyway, and silently
-    breaking when we passed the wrong value cost us a full debug session.
-
-    cwd is the binary's own folder because tun2socks.exe loads wintun.dll
-    from there on Windows.
-    """
-    args = [
-        str(exe),
-        "-device", f"tun://{TUN_NAME}",
-        "-proxy", f"socks5://127.0.0.1:{socks_port}",
-        "-loglevel", "info",
-    ]
-    return _popen_logged(args, "tun2socks.log", cwd=str(exe.parent))
-
-
-def _read_log_tail(log_name: str, max_chars: int = 600) -> str:
-    """Tail data/<log_name> so we can surface it in error messages."""
-    try:
-        log_path = V2RAY_CONF_FILE.parent / log_name
-        if not log_path.exists():
-            return ""
-        text = log_path.read_bytes().decode("utf-8", errors="replace").strip()
-        return "... " + text[-max_chars:] if len(text) > max_chars else text
-    except OSError:
-        return ""
-
-
-def _kill_pid(pid) -> None:
-    """Best-effort terminate. Accepts None / int / numeric string so the
-    same call works for both live process pids and persisted state."""
-    if not pid:
-        return
-    try:
-        pid_int = int(pid)
-    except (TypeError, ValueError):
-        return
-    try:
-        if os.name == "nt":
-            subprocess.run(
-                ["taskkill", "/PID", str(pid_int), "/F", "/T"],
-                check=False, capture_output=True,
-            )
-        else:
-            os.kill(pid_int, 15)  # SIGTERM
-    except (ProcessLookupError, PermissionError, ValueError, OSError):
-        pass
-
-
-def _rollback_routing(steps: list[str], node_ip: str) -> None:
-    """Undo whatever portion of the routing setup succeeded before failure."""
-    if "dns" in steps:
-        _routing.restore_dns()
-    if "split_default" in steps:
-        _routing.remove_default_via_tun(TUN_NAME, TUN_LOCAL_IP)
-    if "host_route" in steps:
-        _routing.remove_host_route(node_ip)
-    if "chain_bypass" in steps:
-        _routing.remove_chain_bypass()
-    # "tun_up" leaves no persistent state — tun device disappears when
-    # tun2socks dies.

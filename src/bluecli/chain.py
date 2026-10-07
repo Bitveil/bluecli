@@ -10,6 +10,7 @@ empty balance instead of crashing.
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -29,6 +30,8 @@ from .config import load_config
 NODE_TYPE_WIREGUARD = 1
 NODE_TYPE_V2RAY = 2
 NODE_TYPE_AMNEZIAWG = 3
+NODE_TYPE_XRAY = 4
+NODE_TYPE_HYSTERIA2 = 5
 
 
 @dataclass
@@ -44,7 +47,7 @@ class NodeInfo:
     moniker: str
     country: str
     remote_url: str
-    node_type: int  # 1 = wireguard, 2 = v2ray, 3 = amneziawg
+    node_type: int  # 1 = wireguard, 2 = v2ray, 3 = amneziawg, 4 = xray, 5 = hysteria2
     gigabyte_prices: list[dict]
     hourly_prices: list[dict]
     # Transports the node itself declares on its public info endpoint
@@ -59,6 +62,8 @@ class NodeInfo:
             NODE_TYPE_WIREGUARD: "wireguard",
             NODE_TYPE_V2RAY: "v2ray",
             NODE_TYPE_AMNEZIAWG: "amneziawg",
+            NODE_TYPE_XRAY: "xray",
+            NODE_TYPE_HYSTERIA2: "hysteria2",
         }.get(
             self.node_type, "unknown"
         )
@@ -175,6 +180,62 @@ class ChainTimeout(ChainError):
     client underneath it) issue gRPC calls without deadlines, so a slow or
     half-open connection — most notably right after a tunnel teardown changes
     routing under an in-flight connection — could otherwise block forever."""
+
+
+def _broadcast(fn, what: str):
+    """Run a tx broadcast (gas simulation + sign + broadcast) under the RPC
+    timeout, turning a raw gRPC rejection into a readable ChainError instead
+    of letting it escape as a traceback. Callers already handle ChainError."""
+    try:
+        return _run_bounded(fn, _RPC_TIMEOUT, what)
+    except grpc.RpcError as e:
+        raise ChainError(_tx_rpc_error_message(e)) from e
+
+
+_PROBE_TIMEOUT = 8.0  # per attempt; a wrong-mode attempt usually fails fast
+
+
+def detect_grpc_tls(host: str, port: int) -> Optional[bool]:
+    """How a gRPC endpoint must be dialled: True = TLS, False = plaintext,
+    None = unreachable either way.
+
+    Each attempt is the very connect BlueCLI does (the SDK's reflection call),
+    so "probe passes" means "BlueCLI will connect". Port 443 is tried with TLS
+    first (public endpoints there are virtually always TLS), any other port
+    plaintext first; the other mode is the fallback.
+    """
+    for use_tls in ((True, False) if port == 443 else (False, True)):
+        try:
+            _run_bounded(
+                lambda tls=use_tls: SDKInstance(host, port, ssl=tls),
+                _PROBE_TIMEOUT, "probe",
+            )
+            return use_tls
+        except Exception:
+            continue
+    return None
+
+
+def _tx_rpc_error_message(err) -> str:
+    """User-facing text for a gRPC error raised while sending a tx."""
+    try:
+        details = err.details() or ""
+    except Exception:
+        details = ""
+    details = details or str(err)
+    if "account sequence mismatch" in details.lower():
+        # The node refused this tx up front (it still counts a previous one
+        # from this wallet as pending), so nothing was charged for this attempt.
+        # Keep the numbers: they tell a slow-but-moving tx from a stuck node.
+        m = re.search(r"expected (\d+), got (\d+)", details)
+        seq = f" (the node expects sequence {m.group(1)}, this attempt used {m.group(2)})" if m else ""
+        return (
+            f"Your wallet still has a previous transaction pending on the chain{seq}. "
+            "Nothing was charged for this attempt — wait a minute and try again. "
+            "If it persists, switch the gRPC endpoint in Settings: the node you "
+            "are using may be lagging or holding a stuck copy of that transaction."
+        )
+    return f"The chain rejected the transaction: {details}"
 
 
 # Wall-clock ceilings for chain RPCs. These are not the expected latency (a
@@ -400,7 +461,7 @@ class ChainClient:
         sdk = self._ensure_signing(secret)
         self._reload_account(sdk)
         tx_params = TxParams(denom=self._denom, gas_multiplier=1.5)
-        tx = _run_bounded(
+        tx = _broadcast(
             lambda: sdk.nodes.SubscribeToNode(
                 node_address=node.address,
                 price=_dict_price_to_proto(price_dict),
@@ -408,7 +469,7 @@ class ChainClient:
                 hours=hours,
                 tx_params=tx_params,
             ),
-            _RPC_TIMEOUT, "start_session broadcast",
+            "start_session broadcast",
         )
         if tx.get("log"):
             raise ChainError(tx["log"])
@@ -439,9 +500,9 @@ class ChainClient:
         sdk = self._ensure_signing(secret)
         self._reload_account(sdk)
         tx_params = TxParams(denom=self._denom, gas_multiplier=1.5)
-        tx = _run_bounded(
+        tx = _broadcast(
             lambda: sdk.sessions.EndSession(session_id=session_id, tx_params=tx_params),
-            _RPC_TIMEOUT, "end_session broadcast",
+            "end_session broadcast",
         )
         if tx.get("log"):
             raise ChainError(tx["log"])
@@ -536,6 +597,8 @@ _SERVICE_TYPE_TO_INT = {
     "wireguard": NODE_TYPE_WIREGUARD,
     "v2ray": NODE_TYPE_V2RAY,
     "amneziawg": NODE_TYPE_AMNEZIAWG,
+    "xray": NODE_TYPE_XRAY,
+    "hysteria2": NODE_TYPE_HYSTERIA2,
 }
 
 # dvpnx >= 9.0.0 serialises v2ray transport enums as their Go byte values
@@ -620,7 +683,13 @@ def _parse_node_response(data: Any) -> dict:
         "country": str(location.get("country", "")),
         # Present on dvpnx >= 9.0.0, absent before: the node's own
         # declaration of its v2ray transports (None when not declared).
-        "transports": _declared_transports(result.get("service_metadata")),
+        # Only v2ray metadata is read: other services (e.g. xray) number
+        # their transport enums differently, so the v2ray table would
+        # misread them — and multihop only chains v2ray nodes anyway.
+        "transports": (
+            _declared_transports(result.get("service_metadata"))
+            if type_int == NODE_TYPE_V2RAY else None
+        ),
     }
 
 

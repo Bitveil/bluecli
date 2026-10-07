@@ -5,6 +5,52 @@ All notable changes to BlueCLI are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.4.0] - 2026-10-06
+
+### Added
+
+- **Xray support.** Connect to Xray nodes with every combination they offer:
+  VLESS (incl. XTLS-Vision), VMess, Trojan and Shadowsocks-2022 over TCP,
+  WebSocket, gRPC, HTTPUpgrade or XHTTP, secured with TLS or Reality. BlueCLI
+  picks the best endpoint the node advertises (Reality, then TLS, then plain)
+  and verifies TLS by pinning the node's certificate.
+- **Hysteria2 support.** Connect to Hysteria2 (QUIC) nodes, including those
+  using Salamander obfuscation, with the node's certificate pinned.
+- Both run fully bundled on Linux and Windows (official Xray-core v26.9.30
+  and Hysteria v2.13.0 binaries) and work like the other protocols:
+  sessions, reconnect after restart, clean teardown and emergency cleanup.
+
+### Changed
+
+- The default chain gRPC endpoint is now `grpc-sentinel.busurnode.com:443` (TLS).
+  Installs that never changed the endpoint pick it up automatically; a
+  custom endpoint set in the settings menu is kept.
+
+### Fixed
+
+- Starting or ending a session while a previous transaction from the same
+  wallet was still pending on the chain crashed with a raw gRPC traceback
+  ("account sequence mismatch"). It now shows a clear message: nothing was
+  charged, wait a minute and try again.
+- **TLS gRPC endpoints (e.g. `:443`) could not be used.** The settings menu
+  only stored host and port, so every endpoint was dialled in plaintext and
+  TLS endpoints such as `sentinel-grpc.publicnode.com:443` were reported as
+  unreachable. Changing the endpoint now tests it — TLS first on port 443,
+  plaintext first elsewhere — and stores the mode that answers; an endpoint
+  that answers in neither mode is not saved. Pasted URLs (`https://…:443/`)
+  are accepted, and switching only the TLS mode now reconnects correctly.
+- The pending-transaction message now shows the sequence numbers the node
+  reported and suggests switching endpoint if it persists.
+- `packaging/build_windows.bat` did not copy the AmneziaWG client into the
+  archive it builds (the CI build was unaffected).
+
+### Internal
+
+- The SOCKS + tun2socks full-tunnel engine is now shared by V2Ray, Xray and
+  Hysteria2 (`vpn/socks_tunnel.py`), with V2Ray's behaviour unchanged.
+- Native transport metadata from the node list is now read only for V2Ray
+  nodes: other services number their enums differently.
+
 ## [1.3.0] - 2026-08-19
 
 ### Added

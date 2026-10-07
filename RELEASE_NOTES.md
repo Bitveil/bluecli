@@ -1,33 +1,36 @@
-# BlueCLI v1.3.0
+# BlueCLI v1.4.0
 
-A minimal, self-contained command-line client for the [Sentinel](https://sentinel.co) decentralised VPN network: create or import a wallet, browse active dVPN nodes, and route your traffic through **WireGuard**, **AmneziaWG**, or **V2Ray** — all as a seamless full tunnel, with multi-hop and on-chain session management.
+A minimal, self-contained command-line client for the [Sentinel](https://sentinel.co) decentralised VPN network: create or import a wallet, browse active dVPN nodes, and route your traffic through **WireGuard**, **AmneziaWG**, **V2Ray**, **Xray**, or **Hysteria2** — all as a seamless full tunnel, with multi-hop and on-chain session management.
 
 ## What's new in this release
 
-- **AmneziaWG support.** Connect to AmneziaWG nodes — WireGuard with DPI-resistant obfuscation — with the same click-and-run experience as the other protocols. Everything needed is bundled: on Windows the official AmneziaWG client runs the tunnel as a service; on Linux the `amneziawg-go` userspace engine is used (no kernel module, no driver install). AmneziaWG nodes now appear in the node browser alongside WireGuard and V2Ray ones; sessions, reconnect after restart, and clean teardown work identically.
-- **Clearer Linux diagnostics.** If a bundled binary has lost its execute bit (it can happen when the folder is transferred as a zip made on Windows), BlueCLI now tells you exactly which file and the one-line fix, instead of a cryptic "command not found".
+- **Xray support.** Connect to Xray nodes with all the combinations they offer — VLESS (incl. XTLS-Vision), VMess, Trojan and Shadowsocks-2022, over TCP, WebSocket, gRPC, HTTPUpgrade or XHTTP, secured with TLS or Reality. BlueCLI automatically picks the strongest endpoint the node offers.
+- **Hysteria2 support.** Connect to Hysteria2 (QUIC) nodes, including those using Salamander obfuscation.
+- Both are fully bundled on Linux and Windows and behave like every other protocol: pay, connect, reconnect after a restart, disconnect cleanly.
+- **TLS gRPC endpoints work.** Any Sentinel gRPC endpoint can now be set in Settings, including TLS ones on port 443 (e.g. publicnode): BlueCLI tests it and picks TLS or plaintext automatically.
+- **No more crash on a pending transaction.** If your wallet still has a previous transaction pending on the chain, BlueCLI now tells you so (nothing is charged) instead of crashing.
 
 ## Highlights
 
-- WireGuard, AmneziaWG, and V2Ray connections, all full-tunnel
+- WireGuard, AmneziaWG, V2Ray, Xray, and Hysteria2 connections, all full-tunnel
 - Multi-hop V2Ray chaining (entry → exit)
 - Wallet create/import (AES-GCM encrypted) with pay-per-gigabyte or per-hour sessions
 - Session browsing, retry, and teardown; automatic cleanup of expired sessions
-- Self-contained: bundled WireGuard / AmneziaWG / V2Ray / tun2socks — the only system requirement is **Python 3.10–3.14**
+- Self-contained: bundled WireGuard / AmneziaWG / V2Ray / Xray / Hysteria2 / tun2socks — the only system requirement is **Python 3.10–3.14**
 - No installation, no services, no telemetry; everything lives in the unpacked folder
 
 ## Download
 
 | Platform | File |
 |---|---|
-| Linux x86-64 | `bluecli-1.3.0-linux-x64.tar.gz` |
-| Windows x64 | `bluecli-1.3.0-windows-x64.zip` |
+| Linux x86-64 | `bluecli-1.4.0-linux-x64.tar.gz` |
+| Windows x64 | `bluecli-1.4.0-windows-x64.zip` |
 
 ## Install
 
 **Linux**
 ```bash
-tar xzf bluecli-1.3.0-linux-x64.tar.gz
+tar xzf bluecli-1.4.0-linux-x64.tar.gz
 cd bluecli-linux-x64
 ./bluecli.sh
 ```
@@ -41,7 +44,7 @@ The first launch builds a local Python virtual environment inside the folder (~3
 Each archive ships with a matching `.sha256` sidecar; verify before running:
 
 ```bash
-sha256sum -c bluecli-1.3.0-linux-x64.tar.gz.sha256
+sha256sum -c bluecli-1.4.0-linux-x64.tar.gz.sha256
 ```
 
 ## Notes

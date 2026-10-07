@@ -167,3 +167,20 @@ def fetch_node_credentials(
         raise NodeHandshakeError("Node credentials payload is not an object.")
 
     return HandshakeResult(node_addrs=list(addrs), peer_data=peer_data)
+
+
+def decode_enum(raw, mapping: dict, default: str = "") -> str:
+    """Translate a handshake-metadata field that can be int (enum),
+    digit-string, or already-textual into its canonical string. Tolerates
+    all three shapes because different nodes / SDK versions emit
+    different ones. Shared by the v2ray and xray backends."""
+    if raw is None or isinstance(raw, bool):
+        return default
+    if isinstance(raw, int):
+        return mapping.get(raw, default)
+    text = str(raw).strip().lower()
+    if not text:
+        return default
+    if text.isdigit():
+        return mapping.get(int(text), default)
+    return text

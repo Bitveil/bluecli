@@ -6,14 +6,16 @@ service. Removing the folder removes the software in its entirety.
 
 Layout at runtime:
   bluecli/
-  ├── bin/{wireguard,v2ray,amneziawg}/  bundled binaries (prepopulated)
+  ├── bin/{wireguard,v2ray,amneziawg,xray,hysteria2}/  bundled binaries
   ├── data/                      created on first launch, holds:
   │   ├── wallet.enc             encrypted wallet
   │   ├── config.json            network/preferences
   │   ├── state.json             current connection (only while connected)
   │   ├── wg-blue.conf           active WireGuard config (only while connected)
   │   ├── awg-blue.conf          active AmneziaWG config (only while connected)
-  │   └── v2ray.json             active V2Ray config (only while connected)
+  │   ├── v2ray.json             active V2Ray config (only while connected)
+  │   ├── xray.json              active Xray config (only while connected)
+  │   └── hysteria2.json         active Hysteria2 config (only while connected)
   └── venv/                      created on first launch by the start script
 
 The project root is discovered from the BLUECLI_HOME env var (set by the
@@ -49,6 +51,8 @@ STATE_FILE = CONFIG_DIR / "state.json"
 WG_CONF_FILE = CONFIG_DIR / "wg-blue.conf"
 V2RAY_CONF_FILE = CONFIG_DIR / "v2ray.json"
 AWG_CONF_FILE = CONFIG_DIR / "awg-blue.conf"
+XRAY_CONF_FILE = CONFIG_DIR / "xray.json"
+HY2_CONF_FILE = CONFIG_DIR / "hysteria2.json"
 
 
 def bin_path(tool: str, name: str) -> Path:
@@ -64,9 +68,9 @@ def bin_path(tool: str, name: str) -> Path:
 # Hard-coded chain defaults. The user can change the gRPC endpoint via the
 # settings menu; everything else is fixed by the Sentinel chain itself.
 DEFAULT_CONFIG: dict[str, Any] = {
-    "grpc_host": "grpc.sentinel.co",
-    "grpc_port": 9090,
-    "grpc_ssl": False,
+    "grpc_host": "grpc-sentinel.busurnode.com",
+    "grpc_port": 443,
+    "grpc_ssl": True,  # :443 endpoint served over TLS
     "chain_id": "sentinelhub-2",
     "denom": "udvpn",
     "language": "en",

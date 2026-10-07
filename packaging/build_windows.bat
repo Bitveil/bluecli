@@ -44,6 +44,17 @@ copy /y bin\v2ray\wintun.dll    "%PKG%\bin\v2ray\" >nul
 copy /y bin\v2ray\geoip.dat     "%PKG%\bin\v2ray\" >nul
 copy /y bin\v2ray\geosite.dat   "%PKG%\bin\v2ray\" >nul
 
+mkdir "%PKG%\bin\amneziawg"
+copy /y bin\amneziawg\amneziawg.exe "%PKG%\bin\amneziawg\" >nul
+
+mkdir "%PKG%\bin\xray"
+copy /y bin\xray\xray.exe "%PKG%\bin\xray\" >nul
+copy /y bin\xray\LICENSE  "%PKG%\bin\xray\" >nul
+
+mkdir "%PKG%\bin\hysteria2"
+copy /y bin\hysteria2\hysteria.exe "%PKG%\bin\hysteria2\" >nul
+copy /y bin\hysteria2\LICENSE      "%PKG%\bin\hysteria2\" >nul
+
 REM --- README -------------------------------------------------------------
 (
 echo BlueCLI v!VERSION!  --  Sentinel dVPN client
@@ -54,7 +65,7 @@ echo ------------
 echo   - Python 3.10-3.14 ^(install from https://www.python.org/^,
 echo     tick "Add Python to PATH" during setup^)
 echo   - Administrator rights ^(the launcher requests them automatically^)
-echo   - That's it. WireGuard, v2ray, tun2socks and wintun are bundled.
+echo   - That's it. WireGuard, v2ray, tun2socks, wintun, AmneziaWG, Xray and Hysteria2 are bundled.
 echo.
 echo Quick start
 echo -----------

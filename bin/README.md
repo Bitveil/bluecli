@@ -63,6 +63,35 @@ lookups go to your normal resolver (not over the tunnel). To eliminate
 this leak, install resolvconf: `sudo apt install resolvconf` on Debian/
 Ubuntu, or it's part of systemd on most modern distros.
 
+## Xray and Hysteria2 binaries (both OSes)
+Both run as a local SOCKS5 proxy; BlueCLI turns it into a full tunnel with
+the same tun2socks (+ wintun.dll on Windows) used for V2Ray, so they need
+nothing beyond their own executable. Official release assets, verified
+against the digests the projects publish:
+
+**Xray — XTLS/Xray-core v26.9.30** (MPL-2.0, `LICENSE` alongside):
+- https://github.com/XTLS/Xray-core/releases — `Xray-linux-64.zip`,
+  `Xray-windows-64.zip`; only the executable is needed (the `.dat` geo
+  files are not used by BlueCLI's config).
+```
+bin/xray/xray          sha256 96efb28b8b2086275598dc46e73b5dc340da948b4e1ccc4f1719f83f67b793a7
+bin/xray/xray.exe      sha256 43fa465275a8a64ddce4a27c3317ae3e99f0c264fec1962e04c3fadda83adc79
+```
+Xray v26 refuses `allowInsecure`; BlueCLI pins the node's self-signed
+certificate (`pinnedPeerCertSha256`) instead. When upgrading, note that
+Xray marks several legacy features (VMess, Trojan, Shadowsocks, WebSocket,
+gRPC, HTTPUpgrade) as deprecated — check the release notes before bumping.
+
+**Hysteria2 — apernet/hysteria app/v2.13.0** (MIT, `LICENSE` alongside):
+- https://github.com/apernet/hysteria/releases — `hysteria-linux-amd64`,
+  `hysteria-windows-amd64.exe`, renamed to:
+```
+bin/hysteria2/hysteria       sha256 907ba8c9693edb104b20582681fb7dc15639d5b64a9cbb616a7b539190a86691
+bin/hysteria2/hysteria.exe   sha256 162ef8fe55dc7ec810dda662908f8e65ec36bd6da39cb87c3bd66184ab68f067
+```
+BlueCLI starts it with `--disable-update-check`: otherwise hysteria
+contacts api.hy2.io on every start, outside the tunnel.
+
 ## Linux ARM64 / macOS
 The same layout. The user has to drop in v2ray + tun2socks for their arch
 from the upstream releases:

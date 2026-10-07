@@ -8,6 +8,7 @@ loops — just nested function calls following the user's choices.
 from __future__ import annotations
 
 import os
+import re
 import socket
 import sys
 import threading
@@ -21,14 +22,27 @@ from . import ui, wallet
 from .chain import (
     ChainClient,
     ChainError,
+    detect_grpc_tls,
     NODE_TYPE_AMNEZIAWG,
+    NODE_TYPE_HYSTERIA2,
     NODE_TYPE_V2RAY,
     NODE_TYPE_WIREGUARD,
+    NODE_TYPE_XRAY,
     NodeInfo,
     WalletNotOnChainError,
 )
 from .i18n import t
-from .vpn import NodeHandshakeError, VpnError, amneziawg, v2ray, wireguard
+from .vpn import NodeHandshakeError, VpnError, amneziawg, hysteria2, v2ray, wireguard, xray
+
+# Node types BlueCLI has a backend for: the browser shows only these, and
+# _bring_up_tunnel must dispatch every one of them (a test enforces both).
+CONNECTABLE_NODE_TYPES = (
+    NODE_TYPE_WIREGUARD,
+    NODE_TYPE_V2RAY,
+    NODE_TYPE_AMNEZIAWG,
+    NODE_TYPE_XRAY,
+    NODE_TYPE_HYSTERIA2,
+)
 
 SATOSHI = 1_000_000  # 1 P2P = 1_000_000 udvpn (base denom stays "udvpn")
 TICKER = "P2P"       # display symbol for the token (was "DVPN" before the rebrand)
@@ -351,12 +365,13 @@ def _load_browseable_nodes(
 
 
 def _browseable(nodes: list) -> list:
-    """Keep only nodes the user can actually connect to (WireGuard/V2Ray that
-    advertise a remote URL), sorted by country then moniker. Shared by the
-    initial load and the manual refresh so both present an identical list."""
+    """Keep only nodes the user can actually connect to (a protocol BlueCLI
+    has a backend for, advertising a remote URL), sorted by country then
+    moniker. Shared by the initial load and the manual refresh so both
+    present an identical list."""
     out = [
         n for n in nodes
-        if n.node_type in (NODE_TYPE_WIREGUARD, NODE_TYPE_V2RAY, NODE_TYPE_AMNEZIAWG) and n.remote_url
+        if n.node_type in CONNECTABLE_NODE_TYPES and n.remote_url
     ]
     out.sort(key=lambda n: (n.country, n.moniker))
     return out
@@ -540,7 +555,8 @@ def _bring_up_tunnel(
         transport_cache.record(node.address, v2ray.offered_transports(creds.handshake_peer_data))
         ui.info(t("connect.bringing_up_v2ray"))
         runtime = v2ray.bring_up(creds, remote_url=node.remote_url).to_state()
-    else:  # NODE_TYPE_AMNEZIAWG — userspace engine + awg tool + own routing
+    elif node.node_type == NODE_TYPE_AMNEZIAWG:
+        # Userspace engine + awg tool + own routing.
         creds = _get_or_fetch_creds(
             state, same_session, node, session_id, priv,
             cls=amneziawg.AWGCredentials, marker_key="awg_privkey_b64",
@@ -548,6 +564,26 @@ def _bring_up_tunnel(
         )
         ui.info(t("connect.bringing_up_amneziawg"))
         runtime = amneziawg.bring_up(creds).to_state()
+    elif node.node_type == NODE_TYPE_XRAY:
+        creds = _get_or_fetch_creds(
+            state, same_session, node, session_id, priv,
+            cls=xray.XrayCredentials, marker_key="xray_uuid_hex",
+            fetch=xray.fetch_creds,
+        )
+        ui.info(t("connect.bringing_up_xray"))
+        runtime = xray.bring_up(creds).to_state()
+    elif node.node_type == NODE_TYPE_HYSTERIA2:
+        creds = _get_or_fetch_creds(
+            state, same_session, node, session_id, priv,
+            cls=hysteria2.Hy2Credentials, marker_key="hy2_uuid",
+            fetch=hysteria2.fetch_creds,
+        )
+        ui.info(t("connect.bringing_up_hysteria2"))
+        runtime = hysteria2.bring_up(creds).to_state()
+    else:
+        # Unreachable while _browseable gates on CONNECTABLE_NODE_TYPES; fail
+        # loudly rather than guess a backend if the two ever drift apart.
+        raise VpnError(f"No backend for node type {node.type_name!r}.")
 
     # Bring-up succeeded → mark not-orphan and save the runtime fields.
     state = cfg.load_state()  # re-read: _get_or_fetch_* may have written
@@ -1089,6 +1125,10 @@ def _teardown_tunnel(state: dict) -> None:
         v2ray.disconnect(state)
     elif backend == "amneziawg":
         amneziawg.disconnect(state)
+    elif backend == "xray":
+        xray.disconnect(state)
+    elif backend == "hysteria2":
+        hysteria2.disconnect(state)
 
 
 def disconnect(unlocked: Optional[wallet.Wallet], client: Optional[ChainClient]) -> None:
@@ -1515,16 +1555,30 @@ def _reconnect_session(unlocked: wallet.Wallet, client: ChainClient, session) ->
 # --------------------------------------------------------------------------
 
 
+def _parse_grpc_endpoint(raw: str) -> tuple:
+    """'host:port' → (host, port). Tolerates what people paste from endpoint
+    lists: a scheme (https://, grpc://...), a trailing slash, spaces. The
+    scheme is ignored — the TLS mode is detected by probing. Raises ValueError
+    on anything else."""
+    text = re.sub(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", "", raw.strip()).rstrip("/")
+    host, port_txt = text.rsplit(":", 1)
+    host, port = host.strip(), int(port_txt)
+    if not host or not 0 < port < 65536:
+        raise ValueError(raw)
+    return host, port
+
+
 def settings_menu() -> bool:
-    """Returns True if the gRPC endpoint differs from when the menu was opened,
+    """Returns True if the gRPC endpoint (host, port or TLS mode) differs from
+    when the menu was opened,
     so the caller can rebuild the chain client against the new endpoint. Just
     viewing settings (or changing then reverting) returns False — nothing to
     rebuild, and the warm node cache is kept."""
     entry = cfg.load_config()
-    entry_grpc = (entry["grpc_host"], entry["grpc_port"])
+    entry_grpc = (entry["grpc_host"], entry["grpc_port"], bool(entry.get("grpc_ssl")))
     while True:
         c = cfg.load_config()
-        grpc = f"{c['grpc_host']}:{c['grpc_port']}"
+        grpc = f"{c['grpc_host']}:{c['grpc_port']}" + (" (TLS)" if c.get("grpc_ssl") else "")
         ui.header(t("settings.menu.title"))
         ui.info(ui.dim(t("settings.label.data_dir", str(cfg.CONFIG_DIR))))
         ui.info("")
@@ -1537,21 +1591,31 @@ def settings_menu() -> bool:
             if not raw:
                 continue
             try:
-                host, port = raw.rsplit(":", 1)
-                c["grpc_host"] = host.strip()
-                c["grpc_port"] = int(port)
-                cfg.save_config(c)
-                ui.success(t("settings.ok.saved"))
-                _pause()
+                host, port = _parse_grpc_endpoint(raw)
             except ValueError:
                 ui.error(t("common.invalid_choice"))
+                continue
+            # Probe before saving: learn whether it needs TLS (e.g. most :443
+            # endpoints) or plaintext, and never replace a working endpoint
+            # with one that doesn't answer.
+            ui.info(t("settings.grpc.testing", f"{host}:{port}"))
+            use_tls = detect_grpc_tls(host, port)
+            if use_tls is None:
+                ui.error(t("settings.grpc.unreachable", f"{host}:{port}"))
+                _pause()
+                continue
+            c.update(grpc_host=host, grpc_port=port, grpc_ssl=use_tls)
+            cfg.save_config(c)
+            ui.success(t("settings.ok.saved_grpc", f"{host}:{port}",
+                         "TLS" if use_tls else "plaintext"))
+            _pause()
         elif choice == "2":
             cfg.save_config(dict(cfg.DEFAULT_CONFIG))
             ui.success(t("settings.ok.saved"))
             _pause()
         elif choice == "3":
             final = cfg.load_config()
-            return (final["grpc_host"], final["grpc_port"]) != entry_grpc
+            return (final["grpc_host"], final["grpc_port"], bool(final.get("grpc_ssl"))) != entry_grpc
         else:
             ui.error(t("common.invalid_choice"))
 

@@ -38,6 +38,12 @@ def _emergency_cleanup() -> None:
         elif state["backend"] == "amneziawg":
             from .vpn import amneziawg
             amneziawg.disconnect(state)
+        elif state["backend"] == "xray":
+            from .vpn import xray
+            xray.disconnect(state)
+        elif state["backend"] == "hysteria2":
+            from .vpn import hysteria2
+            hysteria2.disconnect(state)
         cfg.strip_runtime_state()
     except Exception:
         pass
